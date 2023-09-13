@@ -10,15 +10,14 @@
 #pragma once
 #include "../Includes/IParserApi.h"
 #include "../Share/DLLHelper.hpp"
-//XTP v1.1.19.2
-#include "./XTPQuoteApi/xtp_quote_api.h"
+#include "../API/XTP2.2.32.2/xtp_quote_api.h"
 #include <map>
 
-NS_OTP_BEGIN
+NS_WTP_BEGIN
 class WTSTickData;
-NS_OTP_END
+NS_WTP_END
 
-USING_NS_OTP;
+USING_NS_WTP;
 
 class ParserXTP :	public IParserApi, public XTP::API::QuoteSpi
 {
@@ -36,7 +35,7 @@ public:
 
 //IQuoteParser ½Ó¿Ú
 public:
-	virtual bool init(WTSParams* config) override;
+	virtual bool init(WTSVariant* config) override;
 
 	virtual void release() override;
 
@@ -66,10 +65,12 @@ public:
 	///´íÎóÓ¦´ð
 	virtual void OnError(XTPRI *error_info) override;
 
-
+	virtual void OnSubTickByTick(XTPST *ticker, XTPRI *error_info, bool is_last) override;
 	virtual void OnSubMarketData(XTPST *ticker, XTPRI *error_info, bool is_last) override;
 	virtual void OnUnSubMarketData(XTPST *ticker, XTPRI *error_info, bool is_last) override;
+
 	virtual void OnDepthMarketData(XTPMD *market_data, int64_t bid1_qty[], int32_t bid1_count, int32_t max_bid1_count, int64_t ask1_qty[], int32_t ask1_count, int32_t max_ask1_count) override;
+	virtual void OnTickByTick(XTPTBT *tbt_data) override;
 
 private:
 	/*
@@ -97,6 +98,7 @@ private:
 	std::string			m_strUser;
 	std::string			m_strPass;
 	std::string			m_strFlowDir;
+	std::string			m_strLocalIP;
 
 	XTP_PROTOCOL_TYPE	m_iProtocol;
 	uint32_t			m_uHBInterval;
@@ -107,7 +109,7 @@ private:
 
 	int					m_iRequestID;
 
-	IParserSpi*	m_sink;
+	IParserSpi*			m_sink;
 	IBaseDataMgr*		m_pBaseDataMgr;
 
 	DllHandle		m_hInst;

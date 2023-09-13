@@ -14,7 +14,7 @@
 
 #include <boost/filesystem.hpp>
 
-#ifdef _WIN32
+#ifdef _MSC_VER
 #include <direct.h>
 #else	//UNIX
 #include <unistd.h>
@@ -34,7 +34,7 @@ std::string WtHelper::getCWD()
 	if(_cwd.empty())
 	{
 		char   buffer[256];
-#ifdef _WIN32
+#ifdef _MSC_VER
 		_getcwd(buffer, 255);
 #else	//UNIX
 		getcwd(buffer, 255);
@@ -54,6 +54,14 @@ std::string WtHelper::getModulePath(const char* moduleName, const char* subDir, 
 const char* WtHelper::getStraDataDir()
 {
 	static std::string folder = StrUtil::standardisePath(_gen_dir) + "stradata/";
+	if (!StdFile::exists(folder.c_str()))
+		boost::filesystem::create_directories(folder);
+	return folder.c_str();
+}
+
+const char* WtHelper::getExecDataDir()
+{
+	static std::string folder = StrUtil::standardisePath(_gen_dir) + "execdata/";
 	if (!StdFile::exists(folder.c_str()))
 		boost::filesystem::create_directories(folder);
 	return folder.c_str();
@@ -85,7 +93,7 @@ const char* WtHelper::getOutputDir()
 
 const char* WtHelper::getBaseDir()
 {
-	static std::string folder = StrUtil::standardisePath(_gen_dir) + "generated/";
+	static std::string folder = StrUtil::standardisePath(_gen_dir);
 	if (!StdFile::exists(folder.c_str()))
 		boost::filesystem::create_directories(folder);
 	return folder.c_str();

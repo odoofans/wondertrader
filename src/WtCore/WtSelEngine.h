@@ -7,7 +7,7 @@
 
 #include <memory>
 
-NS_OTP_BEGIN
+NS_WTP_BEGIN
 
 typedef enum tagTaskPeriodType
 {
@@ -49,7 +49,7 @@ public:
 public:
 	//////////////////////////////////////////////////////////////////////////
 	//WtEngine½Ó¿Ú
-	virtual void init(WTSVariant* cfg, IBaseDataMgr* bdMgr, WtDataManager* dataMgr, IHotMgr* hotMgr) override;
+	virtual void init(WTSVariant* cfg, IBaseDataMgr* bdMgr, WtDtMgr* dataMgr, IHotMgr* hotMgr, EventNotifier* notifier) override;
 
 	virtual void run(bool bAsync = false) override;
 
@@ -87,12 +87,12 @@ public:
 
 	void	on_minute_end(uint32_t uDate, uint32_t uTime);
 
-	void	handle_pos_change(const char* stdCode, double diffQty);
+	void	handle_pos_change(const char* straName, const char* stdCode, double diffQty);
 
 private:
-	faster_hashmap<uint32_t, TaskInfoPtr>	_tasks;
+	wt_hashmap<uint32_t, TaskInfoPtr>	_tasks;
 
-	typedef faster_hashmap<uint32_t, SelContextPtr> ContextMap;
+	typedef wt_hashmap<uint32_t, SelContextPtr> ContextMap;
 	ContextMap		_ctx_map;
 
 	WtExecuterMgr	_exec_mgr;
@@ -103,4 +103,4 @@ private:
 	WTSVariant*		_cfg;
 };
 
-NS_OTP_END
+NS_WTP_END

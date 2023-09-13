@@ -14,16 +14,14 @@
 #include <functional>
 #include "WTSTypes.h"
 
-NS_OTP_BEGIN
-class WTSParams;
+NS_WTP_BEGIN
+class WTSVariant;
 class WTSEntrust;
 class WTSOrderInfo;
 class WTSTradeInfo;
 class WTSEntrustAction;
 class WTSAccountInfo;
-class WTSInvestorInfo;
 class WTSPositionItem;
-class WTSPositionDetail;
 class WTSContractInfo;
 class WTSError;
 class WTSTickData;
@@ -100,27 +98,91 @@ public:
 class ITraderSpi
 {
 public:
+	/*
+	 *	获取基础数据管理器
+	 */
 	virtual IBaseDataMgr*	getBaseDataMgr() = 0;
-	virtual void handleTraderLog(WTSLogLevel ll, const char* format, ...){}
 
+	/*
+	 *	处理交易接口的日志
+	 */
+	virtual void handleTraderLog(WTSLogLevel ll, const char* message){}
+
+	/*
+	 *	获取股票交易接口Spi
+	 */
 	virtual IStkTraderSpi* getStkSpi(){ return NULL; }
+
+	/*
+	 *	获取期权交易接口Spi
+	 */
 	virtual IOptTraderSpi* getOptSpi(){ return NULL; }
 
 public:
+	/*
+	 *	处理交易接口事件
+	 */
 	virtual void handleEvent(WTSTraderEvent e, int32_t ec) = 0;
+
+	/*
+	 *	登录回报
+	 */
 	virtual void onLoginResult(bool bSucc, const char* msg, uint32_t tradingdate) = 0;
+
+	/*
+	 *	注销回报
+	 */
 	virtual void onLogout(){}
+
+	/*
+	 *	委托回报
+	 */
 	virtual void onRspEntrust(WTSEntrust* entrust, WTSError *err){}
+
+	/*
+	 * 资金查询回报
+	 */
 	virtual void onRspAccount(WTSArray* ayAccounts) {}
+
+	/*
+	 *	持仓查询回报
+	 */
 	virtual void onRspPosition(const WTSArray* ayPositions){}
+
+	/*
+	 *	订单查询回报
+	 */
 	virtual void onRspOrders(const WTSArray* ayOrders){}
+
+	/*
+	 *	成交查询回报
+	 */
 	virtual void onRspTrades(const WTSArray* ayTrades){}
+
+	/*
+	 *	结算单查询回报
+	 */
 	virtual void onRspSettlementInfo(uint32_t uDate, const char* content){}
 
+	/*
+	 *	订单回报推送
+	 */
 	virtual void onPushOrder(WTSOrderInfo* orderInfo){}
+
+	/*
+	 *	成交回报推送
+	 */
 	virtual void onPushTrade(WTSTradeInfo* tradeRecord){}
 
-	virtual void onTraderError(WTSError*	err){}
+	/*
+	 *	交易接口错误回报
+	 */
+	virtual void onTraderError(WTSError* err){}
+
+	/*
+	 *	合约状态推送
+	 */
+	virtual void onPushInstrumentStatus(const char* exchg, const char* code, WTSTradeStatus state) {}
 };
 
 //下单接口管理接口
@@ -136,17 +198,17 @@ public:
 	/*
 	 *	初始化解析管理器
 	 */
-	virtual bool init(WTSParams *params) = 0;
+	virtual bool init(WTSVariant *params) { return false; }
 
 	/*
 	 *	释放解析管理器
 	 */
-	virtual void release() = 0;
+	virtual void release(){}
 
 	/*
 	 *	注册回调接口
 	 */
-	virtual void registerSpi(ITraderSpi *listener) = 0;
+	virtual void registerSpi(ITraderSpi *listener) {}
 
 
 	//////////////////////////////////////////////////////////////////////////
@@ -155,14 +217,14 @@ public:
 	/*
 	 *	连接服务器
 	 */
-	virtual void connect() = 0;
+	virtual void connect() {}
 
 	/*
 	 *	断开连接
 	 */
-	virtual void disconnect() = 0;
+	virtual void disconnect() {}
 
-	virtual bool isConnected() = 0;
+	virtual bool isConnected() { return false; }
 
 	/*
 	 *	生成委托单号
@@ -172,44 +234,44 @@ public:
 	/*
 	 *	登录接口
 	 */
-	virtual int login(const char* user, const char* pass, const char* productInfo) = 0;
+	virtual int login(const char* user, const char* pass, const char* productInfo) { return -1; }
 
 	/*
 	 *	注销接口
 	 */
-	virtual int logout() = 0;
+	virtual int logout() { return -1; }
 
 	/*
 	 *	下单接口
 	 *	entrust 下单的具体数据结构
 	 */
-	virtual int orderInsert(WTSEntrust* eutrust) = 0;
+	virtual int orderInsert(WTSEntrust* eutrust) { return -1; }
 
 	/*
 	 *	订单操作接口
 	 *	action	操作的具体数据结构
 	 */
-	virtual int orderAction(WTSEntrustAction* action) = 0;
+	virtual int orderAction(WTSEntrustAction* action) { return -1; }
 
 	/*
 	 *	查询账户信息
 	 */
-	virtual int queryAccount() = 0;
+	virtual int queryAccount() { return -1; }
 
 	/*
 	 *	查询持仓信息
 	 */
-	virtual int queryPositions() = 0;
+	virtual int queryPositions() { return -1; }
 
 	/*
 	 *	查询所有订单
 	 */
-	virtual int queryOrders() = 0;
+	virtual int queryOrders() { return -1; }
 
 	/*
 	 *	查询成交明细
 	 */
-	virtual int	queryTrades() = 0;
+	virtual int	queryTrades() { return -1; }
 
 	/*
 	 *	查询结算单
@@ -218,8 +280,8 @@ public:
 
 };
 
-NS_OTP_END
+NS_WTP_END
 
 //获取IDataMgr的函数指针类型
-typedef otp::ITraderApi* (*FuncCreateTrader)();
-typedef void(*FuncDeleteTrader)(otp::ITraderApi* &trader);
+typedef wtp::ITraderApi* (*FuncCreateTrader)();
+typedef void(*FuncDeleteTrader)(wtp::ITraderApi* &trader);

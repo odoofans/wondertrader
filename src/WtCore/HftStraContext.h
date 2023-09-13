@@ -11,14 +11,14 @@
 #include "HftStraBaseCtx.h"
 
 
-USING_NS_OTP;
+USING_NS_WTP;
 
 class HftStrategy;
 
 class HftStraContext : public HftStraBaseCtx
 {
 public:
-	HftStraContext(WtHftEngine* engine, const char* name, bool bAgent);
+	HftStraContext(WtHftEngine* engine, const char* name, bool bAgent, int32_t slippage);
 	virtual ~HftStraContext();
 
 	void set_strategy(HftStrategy* stra){ _strategy = stra; }
@@ -50,6 +50,8 @@ public:
 	virtual void on_channel_lost() override;
 
 	virtual void on_entrust(uint32_t localid, const char* stdCode, bool bSuccess, const char* message) override;
+
+	virtual void on_position(const char* stdCode, bool isLong, double prevol, double preavail, double newvol, double newavail, uint32_t tradingday) override;
 
 
 private:

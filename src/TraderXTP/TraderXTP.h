@@ -12,17 +12,16 @@
 #include <stdint.h>
 #include <boost/asio/io_service.hpp>
 
-//XTP v1.1.19.2
-#include "./XTPApi/xtp_trader_api.h"
+#include "../API/XTP2.2.32.2/xtp_trader_api.h"
 
 #include "../Includes/ITraderApi.h"
 #include "../Includes/WTSCollection.hpp"
 
-#include "../Share/IniHelper.hpp"
 #include "../Share/StdUtils.hpp"
 #include "../Share/DLLHelper.hpp"
+#include "../Share/WtKVCache.hpp"
 
-USING_NS_OTP;
+USING_NS_WTP;
 
 class TraderXTP : public XTP::API::TraderSpi, public ITraderApi
 {
@@ -63,7 +62,7 @@ public:
 public:
 	//////////////////////////////////////////////////////////////////////////
 	//ITraderApi 接口
-	virtual bool init(WTSParams *params) override;
+	virtual bool init(WTSVariant *params) override;
 
 	virtual void release() override;
 
@@ -95,13 +94,15 @@ public:
 
 private:
 	void		reconnect();
-	inline uint32_t	genRequestID();
+	inline uint32_t			genRequestID();
+	void					doLogin();
 
 	inline WTSOrderInfo*	makeOrderInfo(XTPQueryOrderRsp* orderField);
 	inline WTSEntrust*		makeEntrust(XTPOrderInfo *entrustField);
 	inline WTSTradeInfo*	makeTradeInfo(XTPQueryTradeRsp *tradeField);
 
-	inline std::string		genEntrustID(uint32_t orderRef);
+	inline bool	extractEntrustID(const char* entrustid, uint32_t &orderRef);
+	inline void	genEntrustID(char* buffer, uint32_t orderRef);
 
 private:
 	XTP::API::TraderApi*	_api;
@@ -125,6 +126,9 @@ private:
 	int				_client;
 
 	bool			_quick;
+	bool			_inited;
+
+	uint32_t			_hbInterval;
 
 	TraderState		_state;
 
@@ -135,11 +139,16 @@ private:
 
 	boost::asio::io_service		_asyncio;
 	StdThreadPtr				_thrd_worker;
+	typedef std::shared_ptr<boost::asio::io_service::work> BoostWorkerPtr;
+	BoostWorkerPtr				_worker;
 
 	DllHandle		m_hInstXTP;
 	typedef XTP::API::TraderApi* (*XTPCreator)(uint8_t, const char*, XTP_LOG_LEVEL);
 	XTPCreator		m_funcCreator;
 
-	IniHelper		_ini;
+	//委托单标记缓存器
+	WtKVCache		m_eidCache;
+	//订单标记缓存器
+	WtKVCache		m_oidCache;
 };
 

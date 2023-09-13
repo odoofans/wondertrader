@@ -8,86 +8,35 @@
  * \brief 
  */
 #include "TraderCTPOpt.h"
+
 #include "../Includes/WTSError.hpp"
 #include "../Includes/WTSContractInfo.hpp"
 #include "../Includes/WTSSessionInfo.hpp"
 #include "../Includes/WTSTradeDef.hpp"
 #include "../Includes/WTSDataDef.hpp"
-#include "../Includes/WTSParams.hpp"
-#include "../Share/TimeUtils.hpp"
+#include "../Includes/WTSVariant.hpp"
 #include "../Includes/IBaseDataMgr.h"
-#include "../Share/DLLHelper.hpp"
+
+#include "../Share/ModuleHelper.hpp"
 #include "../Share/decimal.h"
-#include "../Share/StrUtil.hpp"
 
 #include <boost/filesystem.hpp>
-
-void inst_hlp(){}
-
-#ifdef _WIN32
-#include <wtypes.h>
-HMODULE	g_dllModule = NULL;
-
-BOOL APIENTRY DllMain(
-	HANDLE hModule,
-	DWORD  ul_reason_for_call,
-	LPVOID lpReserved
-	)
-{
-	switch (ul_reason_for_call)
-	{
-	case DLL_PROCESS_ATTACH:
-		g_dllModule = (HMODULE)hModule;
-		break;
-	}
-	return TRUE;
-}
-#else
-#include <dlfcn.h>
-
-char PLATFORM_NAME[] = "UNIX";
-
-std::string	g_moduleName;
-
-const std::string& getInstPath()
-{
-	static std::string moduleName;
-	if (moduleName.empty())
-	{
-		Dl_info dl_info;
-		dladdr((void *)inst_hlp, &dl_info);
-		moduleName = dl_info.dli_fname;
-	}
-
-	return moduleName;
-}
-#endif
-
-std::string getBinDir()
-{
-	static std::string _bin_dir;
-	if (_bin_dir.empty())
-	{
-
-
-#ifdef _WIN32
-		char strPath[MAX_PATH];
-		GetModuleFileName(g_dllModule, strPath, MAX_PATH);
-
-		_bin_dir = StrUtil::standardisePath(strPath, false);
-#else
-		_bin_dir = getInstPath();
-#endif
-		boost::filesystem::path p(_bin_dir);
-		_bin_dir = p.branch_path().string() + "/";
-	}
-
-	return _bin_dir;
-}
 
 const char* ENTRUST_SECTION = "entrusts";
 const char* ORDER_SECTION = "orders";
 
+//By Wesley @ 2022.01.05
+#include "../Share/fmtlib.h"
+template<typename... Args>
+inline void write_log(ITraderSpi* sink, WTSLogLevel ll, const char* format, const Args&... args)
+{
+	if (sink == NULL)
+		return;
+
+	const char* buffer = fmtutil::format(format, args...);
+
+	sink->handleTraderLog(ll, buffer);
+}
 
 uint32_t strToTime(const char* strTime)
 {
@@ -289,7 +238,7 @@ TraderCTPOpt::~TraderCTPOpt()
 {
 }
 
-bool TraderCTPOpt::init(WTSParams* params)
+bool TraderCTPOpt::init(WTSVariant* params)
 {
 	m_strFront = params->get("front")->asCString();
 	m_strBroker = params->get("broker")->asCString();
@@ -306,11 +255,11 @@ bool TraderCTPOpt::init(WTSParams* params)
 
 	m_strFlowDir = StrUtil::standardisePath(m_strFlowDir);
 
-	WTSParams* param = params->get("ctpmodule");
-	if (param != NULL)
-		m_strModule = getBinDir() + DLLHelper::wrap_module(param->asCString(), "");
-	else
-		m_strModule = DLLHelper::wrap_module("soptthosttraderapi_se", "");
+	std::string module = params->getCString("ctpmodule");
+	if (module.empty())
+		module = "soptthosttraderapi_se";
+
+	m_strModule = getBinDir() + DLLHelper::wrap_module(module.c_str(), "");
 
 	m_hInstCTP = DLLHelper::load_library(m_strModule.c_str());
 #ifdef _WIN32
@@ -333,7 +282,7 @@ void TraderCTPOpt::release()
 {
 	if (m_pUserAPI)
 	{
-		m_pUserAPI->RegisterSpi(NULL);
+		//m_pUserAPI->RegisterSpi(NULL);
 		m_pUserAPI->Release();
 		m_pUserAPI = NULL;
 	}
@@ -354,7 +303,7 @@ void TraderCTPOpt::release()
 void TraderCTPOpt::connect()
 {
 	std::stringstream ss;
-	ss << "./ctpoptdata/flows/" << m_strBroker << "/" << m_strUser << "/";
+	ss << m_strFlowDir << "flows/" << m_strBroker << "/" << m_strUser << "/";
 	boost::filesystem::create_directories(ss.str().c_str());
 	m_pUserAPI = m_funcCreator(ss.str().c_str());
 	m_pUserAPI->RegisterSpi(this);
@@ -430,9 +379,8 @@ bool TraderCTPOpt::makeEntrustID(char* buffer, int length)
 
 	try
 	{
-		memset(buffer, 0, length);
 		uint32_t orderref = m_orderRef.fetch_add(1) + 1;
-		sprintf(buffer, "%06u#%010u#%06u", m_frontID, m_sessionID, orderref);
+		fmtutil::format_to(buffer, "{:06d}#{:010d}#{:06d}", m_frontID, (uint32_t)m_sessionID, orderref);
 		return true;
 	}
 	catch (...)
@@ -463,6 +411,7 @@ int TraderCTPOpt::login(const char* user, const char* pass, const char* productI
 {
 	m_strUser = user;
 	m_strPass = pass;
+	m_strProdInfo = productInfo;
 
 	if (m_pUserAPI == NULL)
 	{
@@ -486,7 +435,7 @@ int TraderCTPOpt::doLogin()
 	int iResult = m_pUserAPI->ReqUserLogin(&req, genRequestID());
 	if (iResult != 0)
 	{
-		m_bscSink->handleTraderLog(LL_ERROR, "[TraderCTPOpt] Sending login request failed: %d", iResult);
+		write_log(m_bscSink, LL_ERROR, "[TraderCTPOpt] Sending login request failed: {}", iResult);
 	}
 
 	return 0;
@@ -506,7 +455,7 @@ int TraderCTPOpt::logout()
 	int iResult = m_pUserAPI->ReqUserLogout(&req, genRequestID());
 	if (iResult != 0)
 	{
-		m_bscSink->handleTraderLog(LL_ERROR, "[TraderCTPOpt] Sending logout request failed: %d", iResult);
+		write_log(m_bscSink, LL_ERROR, "[TraderCTPOpt] Sending logout request failed: {}", iResult);
 	}
 
 	return 0;
@@ -524,7 +473,7 @@ int TraderCTPOpt::orderInsertOpt(WTSEntrust* entrust)
 
 	if(entrust->getBusinessType() != BT_EXECUTE)
 	{
-		if(m_bscSink) m_bscSink->handleTraderLog(LL_ERROR, "[TraderCTPOpt] Bz type not supported except option execution");
+		if(m_bscSink) write_log(m_bscSink, LL_ERROR, "[TraderCTPOpt] Bz type not supported except option execution");
 		return -1;
 	}
 
@@ -544,13 +493,15 @@ int TraderCTPOpt::orderInsertOpt(WTSEntrust* entrust)
 	if (strlen(entrust->getUserTag()) == 0)
 	{
 		///报单引用
-		sprintf(req.ExecOrderRef, "%u", m_orderRef.fetch_add(0));
+		fmt::format_to(req.ExecOrderRef, "{}", m_orderRef.fetch_add(0));
+
 	}
 	else
 	{
 		uint32_t fid, sid, orderref;
 		extractEntrustID(entrust->getEntrustID(), fid, sid, orderref);
-		sprintf(req.ExecOrderRef, "%d", orderref);
+		///报单引用
+		fmt::format_to(req.ExecOrderRef, "{}", orderref);
 	}
 
 	if (strlen(entrust->getUserTag()) > 0)
@@ -568,7 +519,7 @@ int TraderCTPOpt::orderInsertOpt(WTSEntrust* entrust)
 	int iResult = m_pUserAPI->ReqExecOrderInsert(&req, genRequestID());
 	if (iResult != 0)
 	{
-		m_bscSink->handleTraderLog(LL_ERROR, "[TraderCTPOpt] Option execution order inserting failed: %d", iResult);
+		write_log(m_bscSink, LL_ERROR, "[TraderCTPOpt] Option execution order inserting failed: {}", iResult);
 	}
 
 	return 0;
@@ -581,7 +532,7 @@ int TraderCTPOpt::orderActionOpt(WTSEntrustAction* action)
 
 	if (action->getBusinessType() != BT_EXECUTE)
 	{
-		if (m_bscSink) m_bscSink->handleTraderLog(LL_ERROR, "[TraderCTPOpt] Bz type not supported except option execution");
+		if (m_bscSink) write_log(m_bscSink, LL_ERROR, "[TraderCTPOpt] Bz type not supported except option execution");
 		return -1;
 	}
 
@@ -596,7 +547,7 @@ int TraderCTPOpt::orderActionOpt(WTSEntrustAction* action)
 	///投资者代码
 	strcpy(req.InvestorID, m_strUser.c_str());
 	///报单引用
-	sprintf(req.ExecOrderRef, "%u", orderref);
+	fmt::format_to(req.ExecOrderRef, "{}", orderref);
 	///请求编号
 	///前置编号
 	req.FrontID = frontid;
@@ -613,7 +564,7 @@ int TraderCTPOpt::orderActionOpt(WTSEntrustAction* action)
 	int iResult = m_pUserAPI->ReqExecOrderAction(&req, genRequestID());
 	if (iResult != 0)
 	{
-		m_bscSink->handleTraderLog(LL_ERROR, "[TraderCTPOpt] Sending cancel request of option execution order failed: %d", iResult);
+		write_log(m_bscSink, LL_ERROR, "[TraderCTPOpt] Sending cancel request of option execution order failed: {}", iResult);
 	}
 
 	return 0;
@@ -628,7 +579,7 @@ int TraderCTPOpt::queryOrdersOpt(WTSBusinessType bType)
 
 	if (bType != BT_EXECUTE)
 	{
-		if (m_bscSink) m_bscSink->handleTraderLog(LL_ERROR, "[TraderCTPOpt] Bz type not supported except option execution");
+		if (m_bscSink) write_log(m_bscSink, LL_ERROR, "[TraderCTPOpt] Bz type not supported except option execution");
 		return -1;
 	}
 
@@ -654,6 +605,10 @@ int TraderCTPOpt::orderInsert(WTSEntrust* entrust)
 		return -1;
 	}
 
+	WTSContractInfo* ct = entrust->getContractInfo();
+	if (ct == NULL)
+		return -1;
+
 	CThostFtdcInputOrderField req;
 	memset(&req, 0, sizeof(req));
 	///经纪公司代码
@@ -668,18 +623,15 @@ int TraderCTPOpt::orderInsert(WTSEntrust* entrust)
 	if (strlen(entrust->getUserTag()) == 0)
 	{
 		///报单引用
-		sprintf(req.OrderRef, "%u", m_orderRef.fetch_add(0));
+		fmt::format_to(req.OrderRef, "{}", m_orderRef.fetch_add(0));
 
-		//生成本地委托单号
-		//entrust->setEntrustID(generateEntrustID(m_frontID, m_sessionID, m_orderRef++).c_str());	
 	}
 	else
 	{
 		uint32_t fid, sid, orderref;
 		extractEntrustID(entrust->getEntrustID(), fid, sid, orderref);
-		//entrust->setEntrustID(entrust->getUserTag());
 		///报单引用
-		sprintf(req.OrderRef, "%d", orderref);
+		fmt::format_to(req.OrderRef, "{}", orderref);
 	}
 
 	if (strlen(entrust->getUserTag()) > 0)
@@ -689,8 +641,7 @@ int TraderCTPOpt::orderInsert(WTSEntrust* entrust)
 		m_iniHelper.save();
 	}
 
-	WTSContractInfo* ct = m_bdMgr->getContract(entrust->getCode(), entrust->getExchg());
-	WTSCommodityInfo* commInfo = m_bdMgr->getCommodity(ct);
+	WTSCommodityInfo* commInfo = ct->getCommInfo();
 
 	///用户代码
 	//	TThostFtdcUserIDType	UserID;
@@ -706,14 +657,23 @@ int TraderCTPOpt::orderInsert(WTSEntrust* entrust)
 	req.LimitPrice = entrust->getPrice();
 	///数量: 1
 	req.VolumeTotalOriginal = (int)entrust->getVolume();
-	///有效期类型: 当日有效
-	req.TimeCondition = wrapTimeCondition(entrust->getTimeCondition());
-	///GTD日期
-	//	TThostFtdcDateType	GTDDate;
-	///成交量类型: 任何数量
-	req.VolumeCondition = THOST_FTDC_VC_AV;
-	///最小成交量: 1
-	req.MinVolume = 1;
+
+	if (entrust->getOrderFlag() == WOF_NOR)
+	{
+		req.TimeCondition = THOST_FTDC_TC_GFD;
+		req.VolumeCondition = THOST_FTDC_VC_AV;
+	}
+	else if (entrust->getOrderFlag() == WOF_FAK)
+	{
+		req.TimeCondition = THOST_FTDC_TC_IOC;
+		req.VolumeCondition = THOST_FTDC_VC_AV;
+	}
+	else if (entrust->getOrderFlag() == WOF_FOK)
+	{
+		req.TimeCondition = THOST_FTDC_TC_IOC;
+		req.VolumeCondition = THOST_FTDC_VC_CV;
+	}
+
 	///触发条件: 立即
 	req.ContingentCondition = THOST_FTDC_CC_Immediately;
 	///止损价
@@ -732,7 +692,7 @@ int TraderCTPOpt::orderInsert(WTSEntrust* entrust)
 	int iResult = m_pUserAPI->ReqOrderInsert(&req, genRequestID());
 	if (iResult != 0)
 	{
-		m_bscSink->handleTraderLog(LL_ERROR, "[TraderCTPOpt] Order inserting failed: %d", iResult);
+		write_log(m_bscSink, LL_ERROR, "[TraderCTPOpt] Order inserting failed: {}", iResult);
 	}
 
 	return 0;
@@ -750,11 +710,10 @@ int TraderCTPOpt::orderAction(WTSEntrustAction* action)
 	CThostFtdcInputOrderActionField req;
 	memset(&req, 0, sizeof(req));
 	///经纪公司代码
-	strcpy(req.BrokerID, m_strBroker.c_str());
-	///投资者代码
-	strcpy(req.InvestorID, m_strUser.c_str());
+	wt_strcpy(req.BrokerID, m_strBroker.c_str(), m_strBroker.size());
+	wt_strcpy(req.InvestorID, m_strUser.c_str(), m_strUser.size());
 	///报单引用
-	sprintf(req.OrderRef, "%u", orderref);
+	fmt::format_to(req.OrderRef, "{}", orderref);
 	///请求编号
 	///前置编号
 	req.FrontID = frontid;
@@ -775,7 +734,7 @@ int TraderCTPOpt::orderAction(WTSEntrustAction* action)
 	int iResult = m_pUserAPI->ReqOrderAction(&req, genRequestID());
 	if (iResult != 0)
 	{
-		m_bscSink->handleTraderLog(LL_ERROR, "[TraderCTPOpt] Sending cancel request failed: %d", iResult);
+		write_log(m_bscSink, LL_ERROR, "[TraderCTPOpt] Sending cancel request failed: {}", iResult);
 	}
 
 	return 0;
@@ -867,6 +826,30 @@ int TraderCTPOpt::queryTrades()
 	return 0;
 }
 
+int TraderCTPOpt::querySettlement(uint32_t uDate)
+{
+	if (m_pUserAPI == NULL || m_wrapperState != WS_ALLREADY)
+	{
+		return -1;
+	}
+
+	m_strSettleInfo.clear();
+	StdUniqueLock lock(m_mtxQuery);
+	m_queQuery.push([this, uDate]() {
+		CThostFtdcQrySettlementInfoField req;
+		memset(&req, 0, sizeof(req));
+		strcpy(req.BrokerID, m_strBroker.c_str());
+		strcpy(req.InvestorID, m_strUser.c_str());
+		fmt::format_to(req.TradingDay, "{}", uDate);
+
+		m_pUserAPI->ReqQrySettlementInfo(&req, genRequestID());
+	});
+
+	//triggerQuery();
+
+	return 0;
+}
+
 void TraderCTPOpt::OnFrontConnected()
 {
 	if (m_bscSink)
@@ -882,7 +865,7 @@ void TraderCTPOpt::OnFrontDisconnected(int nReason)
 
 void TraderCTPOpt::OnHeartBeatWarning(int nTimeLapse)
 {
-
+	write_log(m_bscSink, LL_DEBUG, "[TraderCTPOpt][{}-{}] Heartbeating...", m_strBroker.c_str(), m_strUser.c_str());
 }
 
 void TraderCTPOpt::OnRspAuthenticate(CThostFtdcRspAuthenticateField *pRspAuthenticateField, CThostFtdcRspInfoField *pRspInfo, int nRequestID, bool bIsLast)
@@ -893,7 +876,7 @@ void TraderCTPOpt::OnRspAuthenticate(CThostFtdcRspAuthenticateField *pRspAuthent
 	}
 	else
 	{
-		m_bscSink->handleTraderLog(LL_INFO, "[TraderCTPOpt][%s-%s] Authentiation failed: %s", m_strBroker.c_str(), m_strUser.c_str(), pRspInfo->ErrorMsg);
+		write_log(m_bscSink, LL_ERROR, "[TraderCTPOpt][{}-{}] Authentiation failed: {}", m_strBroker.c_str(), m_strUser.c_str(), pRspInfo->ErrorMsg);
 		m_wrapperState = WS_LOGINFAILED;
 
 		if (m_bscSink)
@@ -915,11 +898,11 @@ void TraderCTPOpt::OnRspUserLogin(CThostFtdcRspUserLoginField *pRspUserLogin, CT
 		///获取当前交易日
 		m_lDate = atoi(m_pUserAPI->GetTradingDay());
 
-		m_bscSink->handleTraderLog(LL_INFO, "[TraderCTPOpt][%s-%s] Login succeed, AppID: %s, Sessionid: %u, login time: %s...",
+		write_log(m_bscSink, LL_INFO, "[TraderCTPOpt][{}-{}] Login succeed, AppID: {}, Sessionid: {}, login time: {}...",
 			m_strBroker.c_str(), m_strUser.c_str(), m_strAppID.c_str(), m_sessionID, pRspUserLogin->LoginTime);
 
 		std::stringstream ss;
-		ss << "./ctpdata/local/" << m_strBroker << "/";
+		ss << m_strFlowDir << "local/" << m_strBroker << "/";
 		std::string path = StrUtil::standardisePath(ss.str());
 		if (!StdFile::exists(path.c_str()))
 			boost::filesystem::create_directories(path.c_str());
@@ -935,17 +918,17 @@ void TraderCTPOpt::OnRspUserLogin(CThostFtdcRspUserLoginField *pRspUserLogin, CT
 			m_iniHelper.writeUInt("marker", "date", m_lDate);
 			m_iniHelper.save();
 
-			m_bscSink->handleTraderLog(LL_INFO, "[TraderCTPOpt][%s-%s] Trading date changed [%u -> %u], local cache cleared...", m_strBroker.c_str(), m_strUser.c_str(), lastDate, m_lDate);
+			write_log(m_bscSink, LL_INFO, "[TraderCTPOpt][{}-{}] Trading date changed [{} -> {}], local cache cleared...", m_strBroker.c_str(), m_strUser.c_str(), lastDate, m_lDate);
 		}
 
-		m_bscSink->handleTraderLog(LL_INFO, "[TraderCTPOpt][%s-%s] Login succeed, trading date: %u...", m_strBroker.c_str(), m_strUser.c_str(), m_lDate);
+		write_log(m_bscSink, LL_INFO, "[TraderCTPOpt][{}-{}] Login succeed, trading date: {}...", m_strBroker.c_str(), m_strUser.c_str(), m_lDate);
 
-		m_bscSink->handleTraderLog(LL_INFO, "[TraderCTPOpt][%s-%s] Querying confirming state of settlement data...", m_strBroker.c_str(), m_strUser.c_str());
+		write_log(m_bscSink, LL_INFO, "[TraderCTPOpt][{}-{}] Querying confirming state of settlement data...", m_strBroker.c_str(), m_strUser.c_str());
 		queryConfirm();
 	}
 	else
 	{
-		m_bscSink->handleTraderLog(LL_INFO, "[TraderCTPOpt][%s-%s] Login failed: %s", m_strBroker.c_str(), m_strUser.c_str(), pRspInfo->ErrorMsg);
+		write_log(m_bscSink, LL_ERROR, "[TraderCTPOpt][{}-{}] Login failed: {}", m_strBroker.c_str(), m_strUser.c_str(), pRspInfo->ErrorMsg);
 		m_wrapperState = WS_LOGINFAILED;
 
 		if (m_bscSink)
@@ -977,7 +960,7 @@ void TraderCTPOpt::OnRspQrySettlementInfoConfirm(CThostFtdcSettlementInfoConfirm
 			{
 				m_wrapperState = WS_CONFIRMED;
 
-				m_bscSink->handleTraderLog(LL_INFO, "[TraderCTPOpt][%s-%s] Trading channel initialized...", m_strBroker.c_str(), m_strUser.c_str());
+				write_log(m_bscSink, LL_INFO, "[TraderCTPOpt][{}-{}] Trading channel initialized...", m_strBroker.c_str(), m_strUser.c_str());
 				m_wrapperState = WS_ALLREADY;
 				if (m_bscSink)
 					m_bscSink->onLoginResult(true, "", m_lDate);
@@ -986,7 +969,7 @@ void TraderCTPOpt::OnRspQrySettlementInfoConfirm(CThostFtdcSettlementInfoConfirm
 			{
 				m_wrapperState = WS_CONFIRM_QRYED;
 
-				m_bscSink->handleTraderLog(LL_INFO, "[TraderCTPOpt][%s-%s] Confirming settlement data...", m_strBroker.c_str(), m_strUser.c_str());
+				write_log(m_bscSink, LL_INFO, "[TraderCTPOpt][{}-{}] Confirming settlement data...", m_strBroker.c_str(), m_strUser.c_str());
 				confirm();
 			}
 		}
@@ -1007,7 +990,7 @@ void TraderCTPOpt::OnRspSettlementInfoConfirm(CThostFtdcSettlementInfoConfirmFie
 		{
 			m_wrapperState = WS_CONFIRMED;
 
-			m_bscSink->handleTraderLog(LL_INFO, "[TraderCTPOpt][%s-%s] Trading channel initialized...", m_strBroker.c_str(), m_strUser.c_str());
+			write_log(m_bscSink, LL_INFO, "[TraderCTPOpt][{}-{}] Trading channel initialized...", m_strBroker.c_str(), m_strUser.c_str());
 			m_wrapperState = WS_ALLREADY;
 			if (m_bscSink)
 				m_bscSink->onLoginResult(true, "", m_lDate);
@@ -1138,8 +1121,6 @@ void TraderCTPOpt::OnRspQryTradingAccount(CThostFtdcTradingAccountField *pTradin
 	if (bIsLast && !IsErrorRspInfo(pRspInfo))
 	{
 		WTSAccountInfo* accountInfo = WTSAccountInfo::create();
-		accountInfo->setDescription(StrUtil::printf("%s-%s", m_strBroker.c_str(), m_strUser.c_str()).c_str());
-		//accountInfo->setUsername(m_strUserName.c_str());
 		accountInfo->setPreBalance(pTradingAccount->PreBalance);
 		accountInfo->setCloseProfit(pTradingAccount->CloseProfit + pTradingAccount->CashIn);
 		accountInfo->setDynProfit(pTradingAccount->PositionProfit);
@@ -1162,6 +1143,25 @@ void TraderCTPOpt::OnRspQryTradingAccount(CThostFtdcTradingAccountField *pTradin
 	}
 }
 
+void TraderCTPOpt::OnRspQrySettlementInfo(CThostFtdcSettlementInfoField *pSettlementInfo, CThostFtdcRspInfoField *pRspInfo, int nRequestID, bool bIsLast)
+{
+	if (bIsLast)
+	{
+		m_bInQuery = false;
+		//triggerQuery();
+	}
+
+	if (!IsErrorRspInfo(pRspInfo) && pSettlementInfo)
+	{
+		m_strSettleInfo += pSettlementInfo->Content;
+	}
+
+	if (bIsLast && !m_strSettleInfo.empty())
+	{
+		m_bscSink->onRspSettlementInfo(atoi(pSettlementInfo->TradingDay), m_strSettleInfo.c_str());
+	}
+}
+
 void TraderCTPOpt::OnRspQryInvestorPosition(CThostFtdcInvestorPositionField *pInvestorPosition, CThostFtdcRspInfoField *pRspInfo, int nRequestID, bool bIsLast)
 {
 	if (bIsLast)
@@ -1176,14 +1176,18 @@ void TraderCTPOpt::OnRspQryInvestorPosition(CThostFtdcInvestorPositionField *pIn
 			m_mapPosition = PositionMap::create();
 
 		WTSContractInfo* contract = m_bdMgr->getContract(pInvestorPosition->InstrumentID, pInvestorPosition->ExchangeID);
-		WTSCommodityInfo* commInfo = m_bdMgr->getCommodity(contract);
+		if (contract == NULL)
+			return;
+
+		WTSCommodityInfo* commInfo = contract->getCommInfo();
 		if (contract)
 		{
-			std::string key = StrUtil::printf("%s-%d", pInvestorPosition->InstrumentID, pInvestorPosition->PosiDirection);
+			std::string key = fmt::format("{}-{}", pInvestorPosition->InstrumentID, pInvestorPosition->PosiDirection);
 			WTSPositionItem* pos = (WTSPositionItem*)m_mapPosition->get(key);
 			if(pos == NULL)
 			{
 				pos = WTSPositionItem::create(pInvestorPosition->InstrumentID, commInfo->getCurrency(), commInfo->getExchg());
+				pos->setContractInfo(contract);
 				m_mapPosition->add(key, pos, false);
 			}
 			pos->setDirection(wrapPosDirection(pInvestorPosition->PosiDirection));
@@ -1222,11 +1226,11 @@ void TraderCTPOpt::OnRspQryInvestorPosition(CThostFtdcInvestorPositionField *pIn
 						int availNew = pInvestorPosition->Position;
 						if (pInvestorPosition->PosiDirection == THOST_FTDC_PD_Long)
 						{
-							availNew -= pInvestorPosition->LongFrozen;
+							availNew -= pInvestorPosition->ShortFrozen;
 						}
 						else
 						{
-							availNew -= pInvestorPosition->ShortFrozen;
+							availNew -= pInvestorPosition->LongFrozen;
 						}
 						if (availNew < 0)
 							availNew = 0;
@@ -1237,11 +1241,11 @@ void TraderCTPOpt::OnRspQryInvestorPosition(CThostFtdcInvestorPositionField *pIn
 						int availPre = pInvestorPosition->Position;
 						if (pInvestorPosition->PosiDirection == THOST_FTDC_PD_Long)
 						{
-							availPre -= pInvestorPosition->LongFrozen;
+							availPre -= pInvestorPosition->ShortFrozen;
 						}
 						else
 						{
-							availPre -= pInvestorPosition->ShortFrozen;
+							availPre -= pInvestorPosition->LongFrozen;
 						}
 						if (availPre < 0)
 							availPre = 0;
@@ -1253,11 +1257,11 @@ void TraderCTPOpt::OnRspQryInvestorPosition(CThostFtdcInvestorPositionField *pIn
 					int availNew = pInvestorPosition->TodayPosition;
 					if (pInvestorPosition->PosiDirection == THOST_FTDC_PD_Long)
 					{
-						availNew -= pInvestorPosition->LongFrozen;
+						availNew -= pInvestorPosition->ShortFrozen;
 					}
 					else
 					{
-						availNew -= pInvestorPosition->ShortFrozen;
+						availNew -= pInvestorPosition->LongFrozen;
 					}
 					if (availNew < 0)
 						availNew = 0;
@@ -1412,8 +1416,20 @@ WTSOrderInfo* TraderCTPOpt::makeOrderInfo(CThostFtdcOrderField* orderField)
 	pRet->setVolume(orderField->VolumeTotalOriginal);
 	pRet->setDirection(wrapDirectionType(orderField->Direction, orderField->CombOffsetFlag[0]));
 	pRet->setPriceType(wrapPriceType(orderField->OrderPriceType));
-	pRet->setTimeCondition(wrapTimeCondition(orderField->TimeCondition));
 	pRet->setOffsetType(wrapOffsetType(orderField->CombOffsetFlag[0]));
+	pRet->setContractInfo(contract);
+
+	if (orderField->TimeCondition == THOST_FTDC_TC_GFD)
+	{
+		pRet->setOrderFlag(WOF_NOR);
+	}
+	else if (orderField->TimeCondition == THOST_FTDC_TC_IOC)
+	{
+		if (orderField->VolumeCondition == THOST_FTDC_VC_AV || orderField->VolumeCondition == THOST_FTDC_VC_MV)
+			pRet->setOrderFlag(WOF_FAK);
+		else
+			pRet->setOrderFlag(WOF_FOK);
+	}
 
 	pRet->setVolTraded(orderField->VolumeTraded);
 	pRet->setVolLeft(orderField->VolumeTotal);
@@ -1431,7 +1447,8 @@ WTSOrderInfo* TraderCTPOpt::makeOrderInfo(CThostFtdcOrderField* orderField)
 	if (orderField->OrderSubmitStatus >= THOST_FTDC_OSS_InsertRejected)
 		pRet->setError(true);		
 
-	pRet->setEntrustID(generateEntrustID(orderField->FrontID, orderField->SessionID, atoi(orderField->OrderRef)).c_str());
+	//pRet->setEntrustID(generateEntrustID(orderField->FrontID, orderField->SessionID, atoi(orderField->OrderRef)).c_str());
+	generateEntrustID(pRet->getEntrustID(), orderField->FrontID, orderField->SessionID, atoi(orderField->OrderRef));
 	pRet->setOrderID(orderField->OrderSysID);
 
 	pRet->setStateMsg(orderField->StatusMsg);
@@ -1467,13 +1484,26 @@ WTSEntrust* TraderCTPOpt::makeEntrust(CThostFtdcInputOrderField *entrustField)
 		entrustField->VolumeTotalOriginal,
 		entrustField->LimitPrice,
 		ct->getExchg());
-
+	
+	pRet->setContractInfo(ct);
 	pRet->setDirection(wrapDirectionType(entrustField->Direction, entrustField->CombOffsetFlag[0]));
 	pRet->setPriceType(wrapPriceType(entrustField->OrderPriceType));
 	pRet->setOffsetType(wrapOffsetType(entrustField->CombOffsetFlag[0]));
-	pRet->setTimeCondition(wrapTimeCondition(entrustField->TimeCondition));
 
-	pRet->setEntrustID(generateEntrustID(m_frontID, m_sessionID, atoi(entrustField->OrderRef)).c_str());
+	if (entrustField->TimeCondition == THOST_FTDC_TC_GFD)
+	{
+		pRet->setOrderFlag(WOF_NOR);
+	}
+	else if (entrustField->TimeCondition == THOST_FTDC_TC_IOC)
+	{
+		if (entrustField->VolumeCondition == THOST_FTDC_VC_AV || entrustField->VolumeCondition == THOST_FTDC_VC_MV)
+			pRet->setOrderFlag(WOF_FAK);
+		else
+			pRet->setOrderFlag(WOF_FOK);
+	}
+
+	//pRet->setEntrustID(generateEntrustID(m_frontID, m_sessionID, atoi(entrustField->OrderRef)).c_str());
+	generateEntrustID(pRet->getEntrustID(), m_frontID, m_sessionID, atoi(entrustField->OrderRef));
 
 	//StringMap::iterator it = m_mapEntrustTag.find(pRet->getEntrustID());
 	//if (it != m_mapEntrustTag.end())
@@ -1494,6 +1524,7 @@ WTSOrderInfo* TraderCTPOpt::makeOrderInfo(CThostFtdcExecOrderField* orderField)
 		return NULL;
 
 	WTSOrderInfo* pRet = WTSOrderInfo::create();
+	pRet->setContractInfo(contract);
 	pRet->setPrice(0);
 	pRet->setBusinessType(BT_EXECUTE);
 	pRet->setVolume(orderField->Volume);
@@ -1516,7 +1547,8 @@ WTSOrderInfo* TraderCTPOpt::makeOrderInfo(CThostFtdcExecOrderField* orderField)
 		pRet->setOrderState(WOS_Canceled);
 	}
 
-	pRet->setEntrustID(generateEntrustID(orderField->FrontID, orderField->SessionID, atoi(orderField->ExecOrderRef)).c_str());
+	//pRet->setEntrustID(generateEntrustID(orderField->FrontID, orderField->SessionID, atoi(orderField->ExecOrderRef)).c_str());
+	generateEntrustID(pRet->getEntrustID(), orderField->FrontID, orderField->SessionID, atoi(orderField->ExecOrderRef));
 	pRet->setOrderID(orderField->ExecOrderSysID);
 
 	pRet->setStateMsg(orderField->StatusMsg);
@@ -1548,11 +1580,13 @@ WTSEntrust* TraderCTPOpt::makeEntrust(CThostFtdcInputExecOrderField *entrustFiel
 		return NULL;
 
 	WTSEntrust* pRet = WTSEntrust::create(entrustField->InstrumentID, entrustField->Volume, 0, ct->getExchg(), BT_EXECUTE);
+	pRet->setContractInfo(ct);
 
 	pRet->setDirection(wrapPosDirType(entrustField->PosiDirection));
 	pRet->setOffsetType(wrapOffsetType(entrustField->OffsetFlag));
 
-	pRet->setEntrustID(generateEntrustID(m_frontID, m_sessionID, atoi(entrustField->ExecOrderRef)).c_str());
+	//pRet->setEntrustID(generateEntrustID(m_frontID, m_sessionID, atoi(entrustField->ExecOrderRef)).c_str());
+	generateEntrustID(pRet->getEntrustID(), m_frontID, m_sessionID, atoi(entrustField->ExecOrderRef));
 
 	std::string usertag = m_iniHelper.readString(ENTRUST_SECTION, pRet->getEntrustID());
 	if (!usertag.empty())
@@ -1574,13 +1608,13 @@ WTSTradeInfo* TraderCTPOpt::makeTradeRecord(CThostFtdcTradeField *tradeField)
 	if (contract == NULL)
 		return NULL;
 
-	WTSCommodityInfo* commInfo = m_bdMgr->getCommodity(contract);
-	WTSSessionInfo* sInfo = m_bdMgr->getSession(commInfo->getSession());
+	WTSCommodityInfo* commInfo = contract->getCommInfo();
 
 	WTSTradeInfo *pRet = WTSTradeInfo::create(tradeField->InstrumentID, commInfo->getExchg());
 	pRet->setVolume(tradeField->Volume);
 	pRet->setPrice(tradeField->Price);
 	pRet->setTradeID(tradeField->TradeID);
+	pRet->setContractInfo(contract);
 
 	std::string strTime = tradeField->TradeTime;
 	StrUtil::replace(strTime, ":", "");
@@ -1628,21 +1662,32 @@ WTSTradeInfo* TraderCTPOpt::makeTradeRecord(CThostFtdcTradeField *tradeField)
 	return pRet;
 }
 
-std::string TraderCTPOpt::generateEntrustID(uint32_t frontid, uint32_t sessionid, uint32_t orderRef)
+void TraderCTPOpt::generateEntrustID(char* buffer, uint32_t frontid, uint32_t sessionid, uint32_t orderRef)
 {
-	return StrUtil::printf("%06u#%010u#%06u", frontid, sessionid, orderRef);
+	fmtutil::format_to(buffer, "{:06d}#{:010d}#{:06d}", frontid, sessionid, orderRef);
 }
 
 bool TraderCTPOpt::extractEntrustID(const char* entrustid, uint32_t &frontid, uint32_t &sessionid, uint32_t &orderRef)
 {
 	//Market.FrontID.SessionID.OrderRef
-	const StringVector &vecString = StrUtil::split(entrustid, "#");
-	if (vecString.size() != 3)
+	thread_local static char buffer[64];
+	wt_strcpy(buffer, entrustid);
+	char* s = buffer;
+	auto idx = StrUtil::findFirst(s, '#');
+	if (idx == std::string::npos)
 		return false;
+	s[idx] = '\0';
+	frontid = strtoul(s, NULL, 10);
+	s += idx + 1;
 
-	frontid = strtoul(vecString[0].c_str(), NULL, 10);
-	sessionid = strtoul(vecString[1].c_str(), NULL, 10);
-	orderRef = strtoul(vecString[2].c_str(), NULL, 10);
+	idx = StrUtil::findFirst(s, '#');
+	if (idx == std::string::npos)
+		return false;
+	s[idx] = '\0';
+	sessionid = strtoul(s, NULL, 10);
+	s += idx + 1;
+
+	orderRef = strtoul(s, NULL, 10);
 
 	return true;
 }
@@ -1669,6 +1714,12 @@ void TraderCTPOpt::OnErrRtnOrderInsert(CThostFtdcInputOrderField *pInputOrder, C
 	}
 }
 
+void TraderCTPOpt::OnRtnInstrumentStatus(CThostFtdcInstrumentStatusField *pInstrumentStatus)
+{
+	if (m_bscSink)
+		m_bscSink->onPushInstrumentStatus(pInstrumentStatus->ExchangeID, pInstrumentStatus->InstrumentID, (WTSTradeStatus)pInstrumentStatus->InstrumentStatus);
+}
+
 bool TraderCTPOpt::isConnected()
 {
 	return (m_wrapperState == WS_ALLREADY);
@@ -1691,7 +1742,7 @@ int TraderCTPOpt::queryConfirm()
 		int iResult = m_pUserAPI->ReqQrySettlementInfoConfirm(&req, genRequestID());
 		if (iResult != 0)
 		{
-			m_bscSink->handleTraderLog(LL_ERROR, "[TraderCTPOpt][%s-%s] Sending query of settlement data confirming state failed: %d", m_strBroker.c_str(), m_strUser.c_str(), iResult);
+			write_log(m_bscSink, LL_ERROR, "[TraderCTPOpt][{}-{}] Sending query of settlement data confirming state failed: {}", m_strBroker.c_str(), m_strUser.c_str(), iResult);
 		}
 	});
 
@@ -1713,13 +1764,13 @@ int TraderCTPOpt::confirm()
 	strcpy(req.BrokerID, m_strBroker.c_str());
 	strcpy(req.InvestorID, m_strUser.c_str());
 
-	sprintf(req.ConfirmDate, "%u", TimeUtils::getCurDate());
-	strncpy(req.ConfirmTime, TimeUtils::getLocalTime().c_str(), 8);
+	fmt::format_to(req.ConfirmDate, "{}", TimeUtils::getCurDate());
+	memcpy(req.ConfirmTime, TimeUtils::getLocalTime().c_str(), 8);
 
 	int iResult = m_pUserAPI->ReqSettlementInfoConfirm(&req, genRequestID());
 	if (iResult != 0)
 	{
-		m_bscSink->handleTraderLog(LL_ERROR, "[TraderCTPOpt][%s-%s] Sending confirming of settlement data failed: %d", m_strBroker.c_str(), m_strUser.c_str(), iResult);
+		write_log(m_bscSink, LL_ERROR, "[TraderCTPOpt][{}-{}] Sending confirming of settlement data failed: {}", m_strBroker.c_str(), m_strUser.c_str(), iResult);
 		return -1;
 	}
 

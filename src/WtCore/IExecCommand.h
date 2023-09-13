@@ -2,7 +2,7 @@
 #include "../Includes/FasterDefs.h"
 #include <stdint.h>
 
-NS_OTP_BEGIN
+NS_WTP_BEGIN
 class WTSCommodityInfo;
 class WTSSessionInfo;
 class IHotMgr;
@@ -25,12 +25,12 @@ public:
 	/*
 	 *	设置目标仓位
 	 */
-	virtual void set_position(const faster_hashmap<std::string, double>& targets) {}
+	virtual void set_position(const wt_hashmap<std::string, double>& targets) {}
 
 	/*
 	 *	合约仓位变动
 	 */
-	virtual void on_position_changed(const char* stdCode, double targetPos) {}
+	virtual void on_position_changed(const char* stdCode, double diffPos) {}
 
 	/*
 	 *	实时行情回调
@@ -48,4 +48,4 @@ protected:
 	IExecuterStub*	_stub;
 	std::string		_name;
 };
-NS_OTP_END
+NS_WTP_END

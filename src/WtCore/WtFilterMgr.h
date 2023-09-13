@@ -3,12 +3,16 @@
 #include "../Includes/FasterDefs.h"
 #include "../Includes/WTSMarcos.h"
 
-NS_OTP_BEGIN
+NS_WTP_BEGIN
+
+class EventNotifier;
 
 class WtFilterMgr
 {
 public:
-	WtFilterMgr():_filter_timestamp(0){}
+	WtFilterMgr():_filter_timestamp(0), _notifier(NULL){}
+
+	void		set_notifier(EventNotifier* notifier) { _notifier = notifier; }
 
 	/*
 	 *	加载信号过滤器
@@ -64,18 +68,20 @@ private:
 		double			_target;	//目标仓位, 只有当_action为FA_Redirect才生效
 	} FilterItem;
 
-	typedef faster_hashmap<std::string, FilterItem>	FilterMap;
+	typedef wt_hashmap<std::string, FilterItem>	FilterMap;
 	FilterMap		_stra_filters;	//策略过滤器
 
 	FilterMap		_code_filters;	//代码过滤器, 包括合约代码和品种代码, 同一时间只有一个生效, 合约代码优先级高于品种代码
 
 	//交易通道过滤器
-	typedef faster_hashmap<std::string, bool>	ExecuterFilters;
+	typedef wt_hashmap<std::string, bool>	ExecuterFilters;
 	ExecuterFilters	_exec_filters;
 
 	std::string		_filter_file;	//过滤器配置文件
 	uint64_t		_filter_timestamp;	//过滤器文件时间戳
+
+	EventNotifier*	_notifier;
 };
 
-NS_OTP_END
+NS_WTP_END
 

@@ -10,12 +10,12 @@
 #pragma once
 #include "../WtCore/CtaStraBaseCtx.h"
 
-USING_NS_OTP;
+USING_NS_WTP;
 
 class ExpCtaContext : public CtaStraBaseCtx
 {
 public:
-	ExpCtaContext(WtCtaEngine* env, const char* name);
+	ExpCtaContext(WtCtaEngine* env, const char* name, int32_t slippage);
 	virtual ~ExpCtaContext();
 
 public:
@@ -29,6 +29,8 @@ public:
 
 	virtual void on_bar_close(const char* stdCode, const char* period, WTSBarStruct* newBar) override;
 
-	virtual void on_mainkline_updated(uint32_t curDate, uint32_t curTime) override;
+	virtual void on_calculate(uint32_t curDate, uint32_t curTime) override;
+
+	virtual void on_condition_triggered(const char* stdCode, double target, double price, const char* usertag) override;
 };
 

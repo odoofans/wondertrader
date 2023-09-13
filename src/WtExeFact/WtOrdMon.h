@@ -6,6 +6,7 @@
 #include "../Share/StdUtils.hpp"
 
 typedef std::function<void(uint32_t)> EnumOrderCallback;
+typedef std::function<void(uint32_t, uint64_t, bool)> EnumAllOrderCallback;
 
 /*
  *	订单管理器
@@ -15,7 +16,7 @@ class WtOrdMon
 public:
 	/*
 	 *	添加订单
-	 *	
+	 *
 	 */
 	void push_order(const uint32_t* ids, uint32_t cnt, uint64_t curTime, bool bCanCancel = true);
 
@@ -38,6 +39,13 @@ public:
 	}
 
 	void check_orders(uint32_t expiresecs, uint64_t curTime, EnumOrderCallback callback);
+
+	inline void clear_orders()
+	{
+		_orders.clear();
+	}
+
+	void enumOrder(EnumAllOrderCallback cb);
 
 private:
 	typedef std::pair<uint64_t, bool> OrderPair;	//uint64_t - entertime, bool - cancancel

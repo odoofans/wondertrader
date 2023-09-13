@@ -8,54 +8,50 @@
  * \brief 
  */
 #include "WtEngine.h"
-#include "WtDataManager.h"
+#include "WtDtMgr.h"
 #include "WtHelper.h"
 
 #include "../Share/TimeUtils.hpp"
 #include "../Share/StrUtil.hpp"
-#include "../Share/StdUtils.hpp"
-#include "../Share/BoostFile.hpp"
-#include "../Share/JsonToVariant.hpp"
 #include "../Share/decimal.h"
 #include "../Share/CodeHelper.hpp"
 
 #include "../Includes/IBaseDataMgr.h"
 #include "../Includes/IHotMgr.h"
 
-#include "../Includes/WTSVariant.hpp"
 #include "../Includes/WTSContractInfo.hpp"
 #include "../Includes/WTSSessionInfo.hpp"
+#include "../Includes/WTSVariant.hpp"
 
 #include "../Includes/WTSDataDef.hpp"
 #include "../Includes/WTSRiskDef.hpp"
 
 #include "../WTSTools/WTSLogger.h"
+#include "../WTSUtils/WTSCfgLoader.h"
 
 #include <rapidjson/document.h>
 #include <rapidjson/prettywriter.h>
 namespace rj = rapidjson;
 
-#ifdef _WIN32
-#define my_stricmp _stricmp
-#else
-#define my_stricmp strcasecmp
-#endif
 
-
-USING_NS_OTP;
+USING_NS_WTP;
 
 WtEngine::WtEngine()
-	:_port_fund(NULL)
+	: _port_fund(NULL)
 	, _risk_volscale(1.0)
 	, _risk_date(0)
 	, _terminated(false)
 	, _evt_listener(NULL)
 	, _adapter_mgr(NULL)
+	, _notifier(NULL)
+	, _fund_udt_span(0)
+	, _ready(false)
 {
 	TimeUtils::getDateTime(_cur_date, _cur_time);
 	_cur_secs = _cur_time % 100000;
 	_cur_time /= 100000;
 	_cur_raw_time = _cur_time;
+	_cur_tdate = _cur_date;
 
 	WtHelper::setTime(_cur_date, _cur_time, _cur_secs);
 }
@@ -83,14 +79,26 @@ void WtEngine::set_trading_date(uint32_t curTDate)
 
 WTSCommodityInfo* WtEngine::get_commodity_info(const char* stdCode)
 {
-	return _base_data_mgr->getCommodity(CodeHelper::stdCodeToStdCommID(stdCode).c_str());
+	CodeHelper::CodeInfo codeInfo = CodeHelper::extractStdCode(stdCode, _hot_mgr);
+	return _base_data_mgr->getCommodity(codeInfo._exchg, codeInfo._product);
 }
 
 WTSContractInfo* WtEngine::get_contract_info(const char* stdCode)
 {
-	CodeHelper::CodeInfo cInfo;
-	CodeHelper::extractStdCode(stdCode, cInfo);
+	CodeHelper::CodeInfo cInfo = CodeHelper::extractStdCode(stdCode, _hot_mgr);
 	return _base_data_mgr->getContract(cInfo._code, cInfo._exchg);
+}
+
+std::string WtEngine::get_rawcode(const char* stdCode)
+{
+	CodeHelper::CodeInfo cInfo = CodeHelper::extractStdCode(stdCode, _hot_mgr);
+	if (cInfo.hasRule())
+	{
+		std::string code = _hot_mgr->getCustomRawCode(cInfo._ruletag, cInfo.stdCommID(), _cur_tdate);
+		return CodeHelper::rawMonthCodeToStdCode(code.c_str(), cInfo._exchg);
+	}
+
+	return "";
 }
 
 WTSSessionInfo* WtEngine::get_session_info(const char* sid, bool isCode /* = false */)
@@ -98,7 +106,8 @@ WTSSessionInfo* WtEngine::get_session_info(const char* sid, bool isCode /* = fal
 	if (!isCode)
 		return _base_data_mgr->getSession(sid);
 
-	WTSCommodityInfo* cInfo = _base_data_mgr->getCommodity(CodeHelper::stdCodeToStdCommID(sid).c_str());
+	CodeHelper::CodeInfo codeInfo = CodeHelper::extractStdCode(sid, _hot_mgr);
+	WTSCommodityInfo* cInfo = _base_data_mgr->getCommodity(codeInfo._exchg, codeInfo._product);
 	if (cInfo == NULL)
 		return NULL;
 
@@ -111,6 +120,7 @@ void WtEngine::on_tick(const char* stdCode, WTSTickData* curTick)
 
 	//先检查是否要信号要触发
 	{
+		bool bTriggered = false;
 		auto it = _sig_map.find(stdCode);
 		if (it != _sig_map.end())
 		{
@@ -121,15 +131,18 @@ void WtEngine::on_tick(const char* stdCode, WTSTickData* curTick)
 				const SigInfo& sInfo = it->second;
 				double pos = sInfo._volume;
 				std::string code = stdCode;
-				push_task([this, code, pos](){
-					do_set_position(code.c_str(), pos);
-				});
+				do_set_position(code.c_str(), pos, curTick->price());
 				_sig_map.erase(it);
+				bTriggered = true;
 			}
 
 		}
+
+		if(bTriggered)
+			save_datas();
 	}
 
+	//如果成交量为0，价格也不会有变动
 	if (curTick->volume() == 0)
 		return;
 
@@ -159,6 +172,10 @@ void WtEngine::on_tick(const char* stdCode, WTSTickData* curTick)
 			pInfo->_dynprofit = dynprofit;
 		}
 	});
+
+	push_task([this]() {
+		update_fund_dynprofit();
+	});
 }
 
 void WtEngine::update_fund_dynprofit()
@@ -168,6 +185,13 @@ void WtEngine::update_fund_dynprofit()
 	{
 		//上次结算日期等于当前交易日,说明已经结算,不再更新了
 		return;
+	}
+
+	int64_t now = TimeUtils::getLocalTimeNow();
+	if(_fund_udt_span != 0)
+	{
+		if (now - fundInfo._update_time < _fund_udt_span * 1000)
+			return;
 	}
 
 	double profit = 0.0;
@@ -203,17 +227,16 @@ void WtEngine::update_fund_dynprofit()
 		fundInfo._min_md_dyn_bal._dyn_balance = dynbalance;
 		fundInfo._min_md_dyn_bal._date = _cur_tdate;
 	}
+
+	fundInfo._update_time = now;
 }
 
-void WtEngine::writeRiskLog(const char* fmt, ...)
+void WtEngine::writeRiskLog(const char* message)
 {
-	char szBuf[2048] = { 0 };
-	uint32_t length = sprintf(szBuf, "[资金风控]");
-	strcat(szBuf, fmt);
-	va_list args;
-	va_start(args, fmt);
-	WTSLogger::vlog2("risk", LL_INFO, szBuf, args);
-	va_end(args);
+	static thread_local char szBuf[2048] = { 0 };
+	auto len = wt_strcpy(szBuf, "[RiskControl] ");
+	wt_strcpy(szBuf + len, message);
+	WTSLogger::log_raw_by_cat("risk", LL_INFO, szBuf);
 }
 
 uint32_t WtEngine::getCurDate()
@@ -242,8 +265,7 @@ void WtEngine::setVolScale(double scale)
 	_risk_volscale = scale;
 	_risk_date = _cur_tdate;
 
-	WTSLogger::log2_raw("risk", LL_INFO, fmt::format("Position risk scale updated: {} - > {}", oldScale, scale).c_str());
-
+	WTSLogger::log_by_cat("risk", LL_INFO, "Position risk scale updated: {} - > {}", oldScale, scale);
 	save_datas();
 }
 
@@ -255,26 +277,36 @@ WTSPortFundInfo* WtEngine::getFundInfo()
 	return _port_fund;
 }
 
-void WtEngine::init(WTSVariant* cfg, IBaseDataMgr* bdMgr, WtDataManager* dataMgr, IHotMgr* hotMgr)
+void WtEngine::init(WTSVariant* cfg, IBaseDataMgr* bdMgr, WtDtMgr* dataMgr, IHotMgr* hotMgr, EventNotifier* notifier)
 {
 	_base_data_mgr = bdMgr;
 	_data_mgr = dataMgr;
 	_hot_mgr = hotMgr;
+	_notifier = notifier;
 
-	WTSLogger::info("Platform running mode: Production");
+	WTSLogger::info("Running mode: Production");
 
-	//_filter_file = cfg->getCString("filters");
-	//load_strategy_filters();
+	_filter_mgr.set_notifier(notifier);
+
 	_filter_mgr.load_filters(cfg->getCString("filters"));
 
 	load_fees(cfg->getCString("fees"));
 
 	load_datas();
 
+	init_outputs();
+
 	WTSVariant* cfgRisk = cfg->get("riskmon");
 	if(cfgRisk)
 	{
 		init_riskmon(cfgRisk);
+	}
+	else
+	{
+		//如果没有配置风控线程，则需要自己更新浮动盈亏
+		//把更新时间间隔设置为5s
+		_fund_udt_span = 5;
+		WTSLogger::log_raw(LL_WARN, "RiskMon is not configured, portfilio fund will be updated every 5s");
 	}
 }
 
@@ -302,7 +334,7 @@ void WtEngine::on_session_end()
 
 		//可能这里还需要写一条资金记录
 		//date,predynbalance,prebalance,balance,closeprofit,dynprofit,fee,maxdynbalance,maxtime,mindynbalance,mintime,mdmaxbalance,mdmaxdate,mdminbalance,mdmindate
-		fund_log->write_file(StrUtil::printf("%u,%f,%f,%f,%f,%f,%f,%f,%u,%f,%u,%f,%u,%f,%u\n", 
+		fund_log->write_file(fmt::format("{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}\n", 
 			_cur_tdate, fundInfo._predynbal, fundInfo._prebalance, fundInfo._balance, 
 			fundInfo._profit, fundInfo._dynprofit, fundInfo._fees, fundInfo._max_dyn_bal,
 			fundInfo._max_time, fundInfo._min_dyn_bal, fundInfo._min_time,
@@ -361,6 +393,8 @@ void WtEngine::save_datas()
 
 		jFund.AddMember("maxmd", jMaxMD, allocator);
 		jFund.AddMember("minmd", jMinMD, allocator);
+
+		jFund.AddMember("update_time", fundInfo._update_time, allocator);
 
 		root.AddMember("fund", jFund, allocator);
 	}
@@ -479,6 +513,11 @@ void WtEngine::load_datas()
 			const rj::Value& jMinMD = jFund["minmd"];
 			fundInfo._min_md_dyn_bal._dyn_balance = jMinMD["dyn_balance"].GetDouble();
 			fundInfo._min_md_dyn_bal._date = jMinMD["date"].GetUint();
+
+			if(jFund.HasMember("update_time"))
+			{
+				fundInfo._update_time = jFund["update_time"].GetInt64();
+			}
 		}
 	}
 
@@ -493,7 +532,7 @@ void WtEngine::load_datas()
 				const char* stdCode = pItem["code"].GetString();
 				PosInfo& pInfo = _pos_map[stdCode];
 				pInfo._closeprofit = pItem["closeprofit"].GetDouble();
-				pInfo._volume = pItem["volume"].GetInt();
+				pInfo._volume = pItem["volume"].GetDouble();
 				if (pInfo._volume == 0)
 					pInfo._dynprofit = 0;
 				else
@@ -506,27 +545,29 @@ void WtEngine::load_datas()
 				if (details.IsNull() || !details.IsArray() || details.Size() == 0)
 					continue;
 
-				pInfo._details.resize(details.Size());
-
 				for (uint32_t i = 0; i < details.Size(); i++)
 				{
 					const rj::Value& dItem = details[i];
-					DetailInfo& dInfo = pInfo._details[i];
+					DetailInfo dInfo;
 					dInfo._long = dItem["long"].GetBool();
 					dInfo._price = dItem["price"].GetDouble();
-					dInfo._volume = dItem["volume"].GetInt();
+					dInfo._volume = dItem["volume"].GetDouble();
 					dInfo._opentime = dItem["opentime"].GetUint64();
 					if (dItem.HasMember("opentdate"))
 						dInfo._opentdate = dItem["opentdate"].GetUint();
 
 					dInfo._profit = dItem["profit"].GetDouble();
-
+					pInfo._details.emplace_back(dInfo);
 				}
+
+				WTSLogger::debug("Porfolio position confirmed,{} -> {}", stdCode, pInfo._volume);
 			}
 		}
 
 		WTSFundStruct& fundInfo = _port_fund->fundInfo();
 		fundInfo._dynprofit = total_dynprofit;
+
+		WTSLogger::debug("{} position info of portfolio loaded", _pos_map.size());
 	}
 
 	if(root.HasMember("riskmon"))
@@ -553,20 +594,22 @@ WTSTickData* WtEngine::get_last_tick(uint32_t sid, const char* stdCode)
 
 WTSKlineSlice* WtEngine::get_kline_slice(uint32_t sid, const char* stdCode, const char* period, uint32_t count, uint32_t times /* = 1 */, uint64_t etime /* = 0 */)
 {
-	WTSCommodityInfo* cInfo = _base_data_mgr->getCommodity(CodeHelper::stdCodeToStdCommID(stdCode).c_str());
+	CodeHelper::CodeInfo codeInfo = CodeHelper::extractStdCode(stdCode, _hot_mgr);
+	WTSCommodityInfo* cInfo = _base_data_mgr->getCommodity(codeInfo._exchg, codeInfo._product);
 	if (cInfo == NULL)
 		return NULL;
 
-	WTSSessionInfo* sInfo = _base_data_mgr->getSession(cInfo->getSession());
-	if (sInfo == NULL)
-		return NULL;
+	//WTSSessionInfo* sInfo = cInfo->getSessionInfo();
 
-	std::string key = StrUtil::printf("%s-%s-%u", stdCode, period, times);
-	SIDSet& sids = _bar_sub_map[key];
-	sids.insert(sid);
+	//std::string key = StrUtil::printf("%s-%s-%u", stdCode, period, times);
+	thread_local static char key[64] = { 0 };
+	fmtutil::format_to(key, "{}-{}-{}", stdCode, period, times);
+
+	SubList& sids = _bar_sub_map[key];
+	sids[sid] = std::make_pair(sid, 0);
 
 	WTSKlinePeriod kp;
-	if (strcmp(period, "m") == 0)
+	if (period[0] == 'm')
 	{
 		if (times % 5 == 0)
 		{
@@ -598,6 +641,7 @@ void WtEngine::handle_push_quote(WTSTickData* curTick, uint32_t hotFlag)
 		std::string hotCode = CodeHelper::stdCodeToStdHotCode(stdCode.c_str());
 		WTSTickData* hotTick = WTSTickData::create(curTick->getTickStruct());
 		hotTick->setCode(hotCode.c_str());
+		hotTick->setContractInfo(curTick->getContractInfo());
 		
 		_data_mgr->handle_push_quote(hotCode.c_str(), hotTick);
 		on_tick(hotCode.c_str(), hotTick);
@@ -609,6 +653,7 @@ void WtEngine::handle_push_quote(WTSTickData* curTick, uint32_t hotFlag)
 		std::string scndCode = CodeHelper::stdCodeToStd2ndCode(stdCode.c_str());
 		WTSTickData* scndTick = WTSTickData::create(curTick->getTickStruct());
 		scndTick->setCode(scndCode.c_str());
+		scndTick->setContractInfo(curTick->getContractInfo());
 
 		_data_mgr->handle_push_quote(scndCode.c_str(), scndTick);
 		on_tick(scndCode.c_str(), scndTick);
@@ -619,16 +664,33 @@ void WtEngine::handle_push_quote(WTSTickData* curTick, uint32_t hotFlag)
 
 double WtEngine::get_cur_price(const char* stdCode)
 {
-	auto it = _price_map.find(stdCode);
+	auto len = strlen(stdCode);
+	char lastChar = stdCode[len - 1];
+	//前复权直接读取标准合约代码
+	bool bAdjusted = (lastChar == SUFFIX_QFQ || lastChar == SUFFIX_HFQ);
+	//前复权需要去掉－，后复权和未复权都直接查找
+	std::string sCode = (lastChar == SUFFIX_QFQ) ? std::string(stdCode, len - 1) : stdCode;
+	auto it = _price_map.find(sCode);
 	if(it == _price_map.end())
 	{
-		WTSTickData* lastTick = _data_mgr->grab_last_tick(stdCode);
+		//找不到的时候，先读取未复权的tick数据
+		std::string fCode = bAdjusted ? std::string(stdCode, len - 1) : stdCode;
+		WTSTickData* lastTick = _data_mgr->grab_last_tick(fCode.c_str());
 		if (lastTick == NULL)
 			return 0.0;
 
+		WTSContractInfo* cInfo = lastTick->getContractInfo();
+
 		double ret = lastTick->price();
 		lastTick->release();
-		_price_map[stdCode] = ret;
+
+		//如果是后复权，则进行复权处理
+		if (lastChar == SUFFIX_HFQ)
+		{
+			ret *= get_exright_factor(stdCode, cInfo->getCommInfo());
+		}
+
+		_price_map[sCode] = ret;
 		return ret;
 	}
 	else
@@ -637,42 +699,137 @@ double WtEngine::get_cur_price(const char* stdCode)
 	}
 }
 
+double WtEngine::get_day_price(const char* stdCode, int flag /* = 0 */)
+{
+	auto len = strlen(stdCode);
+	char lastChar = stdCode[len - 1];
+	//前复权直接读取标准合约代码
+	bool bAdjusted = (lastChar == SUFFIX_QFQ || lastChar == SUFFIX_HFQ);
+	//前复权需要去掉－，后复权和未复权都直接查找
+	std::string sCode = (lastChar == SUFFIX_QFQ) ? std::string(stdCode, len - 1) : stdCode;
+
+	//找不到的时候，先读取未复权的tick数据
+	std::string fCode = bAdjusted ? std::string(stdCode, len - 1) : stdCode;
+	WTSTickData* lastTick = _data_mgr->grab_last_tick(fCode.c_str());
+	if (lastTick == NULL)
+		return 0.0;
+
+	WTSCommodityInfo* commInfo = get_commodity_info(fCode.c_str());
+
+	double ret = 0.0;
+	switch (flag)
+	{
+	case 0:
+		ret = lastTick->open(); break;
+	case 1:
+		ret = lastTick->high(); break;
+	case 2:
+		ret = lastTick->low(); break;
+	case 3:
+		ret = lastTick->price(); break;
+	default:
+		break;
+	}
+	lastTick->release();
+
+	//如果是后复权，则进行复权处理
+	if (lastChar == SUFFIX_HFQ)
+	{
+		ret *= get_exright_factor(stdCode, commInfo);
+	}
+
+	return ret;
+}
+
+double WtEngine::get_exright_factor(const char* stdCode, WTSCommodityInfo* commInfo /* = NULL */)
+{
+	if (commInfo == NULL)
+		commInfo = get_commodity_info(stdCode);
+
+	if (commInfo == NULL)
+		return 1.0;
+
+	if (commInfo->isStock())
+		return _data_mgr->get_adjusting_factor(stdCode, get_trading_date());
+	else
+	{
+		const char* ruleTag = _hot_mgr->getRuleTag(stdCode);
+		if(strlen(ruleTag) > 0)
+			return _hot_mgr->getRuleFactor(ruleTag, commInfo->getFullPid(), get_trading_date());
+	}
+
+	return 1.0;
+}
+
+uint32_t WtEngine::get_adjusting_flag()
+{
+	if (_data_mgr)
+		_data_mgr->get_adjusting_flag();
+
+	return 0;
+}
+
 void WtEngine::sub_tick(uint32_t sid, const char* stdCode)
 {
 	//如果是主力合约代码, 如SHFE.ag.HOT, 那么要转换成原合约代码, SHFE.ag.1912
 	//因为执行器只识别原合约代码
-	if (CodeHelper::isStdFutHotCode(stdCode))
+	const char* ruleTag = _hot_mgr->getRuleTag(stdCode);
+	if(strlen(ruleTag) > 0)
 	{
-		SIDSet& sids = _tick_sub_map[stdCode];
-		sids.insert(sid);
+		//SubList& sids = _tick_sub_map[stdCode];
+		//sids[sid] = std::make_pair(sid, 0);
 
-		CodeHelper::CodeInfo cInfo;
-		CodeHelper::extractStdFutCode(stdCode, cInfo);
-		std::string rawCode = _hot_mgr->getRawCode(cInfo._exchg, cInfo._product, _cur_tdate);
-		std::string stdRawCode = CodeHelper::bscFutCodeToStdCode(rawCode.c_str(), cInfo._exchg);
-		_ticksubed_raw_codes.insert(stdRawCode);
-	}
-	else if (CodeHelper::isStdFut2ndCode(stdCode))
-	{
-		SIDSet& sids = _tick_sub_map[stdCode];
-		sids.insert(sid);
+		std::size_t length = strlen(stdCode);
+		uint32_t flag = 0;
+		if (stdCode[length - 1] == SUFFIX_QFQ || stdCode[length - 1] == SUFFIX_HFQ)
+		{
+			length--;
 
-		CodeHelper::CodeInfo cInfo;
-		CodeHelper::extractStdFutCode(stdCode, cInfo);
-		std::string rawCode = _hot_mgr->getSecondRawCode(cInfo._exchg, cInfo._product, _cur_tdate);
-		std::string stdRawCode = CodeHelper::bscFutCodeToStdCode(rawCode.c_str(), cInfo._exchg);
-		_ticksubed_raw_codes.insert(stdRawCode);
+			flag = (stdCode[length] == SUFFIX_QFQ) ? 1 : 2;
+		}
+
+		SubList& sids = _tick_sub_map[std::string(stdCode, length)];
+		sids[sid] = std::make_pair(sid, flag);
+
+		CodeHelper::CodeInfo cInfo = CodeHelper::extractStdCode(stdCode, _hot_mgr);
+		std::string rawCode = _hot_mgr->getCustomRawCode(ruleTag, cInfo.stdCommID(), _cur_tdate);
+		std::string stdRawCode = CodeHelper::rawMonthCodeToStdCode(rawCode.c_str(), cInfo._exchg);
 	}
+	//if (CodeHelper::isStdFutHotCode(stdCode))
+	//{
+	//	SubList& sids = _tick_sub_map[stdCode];
+	//	sids[sid] = std::make_pair(sid, 0);
+
+	//	CodeHelper::CodeInfo cInfo = CodeHelper::extractStdCode(stdCode);
+	//	std::string rawCode = _hot_mgr->getRawCode(cInfo._exchg, cInfo._product, _cur_tdate);
+	//	std::string stdRawCode = CodeHelper::rawMonthCodeToStdCode(rawCode.c_str(), cInfo._exchg);
+	//	//_ticksubed_raw_codes.insert(stdRawCode);
+	//}
+	//else if (CodeHelper::isStdFut2ndCode(stdCode))
+	//{
+	//	SubList& sids = _tick_sub_map[stdCode];
+	//	sids[sid] = std::make_pair(sid, 0);
+
+	//	CodeHelper::CodeInfo cInfo = CodeHelper::extractStdCode(stdCode);
+	//	std::string rawCode = _hot_mgr->getSecondRawCode(cInfo._exchg, cInfo._product, _cur_tdate);
+	//	std::string stdRawCode = CodeHelper::rawMonthCodeToStdCode(rawCode.c_str(), cInfo._exchg);
+	//	//_ticksubed_raw_codes.insert(stdRawCode);
+	//}
 	else
 	{
 		std::size_t length = strlen(stdCode);
-		if (stdCode[length - 1] == 'Q')
+		uint32_t flag = 0;
+		if (stdCode[length - 1] == SUFFIX_QFQ || stdCode[length - 1] == SUFFIX_HFQ)
+		{
 			length--;
 
-		SIDSet& sids = _tick_sub_map[std::string(stdCode, length)];
-		sids.insert(sid);
+			flag = (stdCode[length - 1] == SUFFIX_QFQ) ? 1 : 2;
+		}
 
-		_ticksubed_raw_codes.insert(std::string(stdCode, length));
+		SubList& sids = _tick_sub_map[std::string(stdCode, length)];
+		sids[sid] = std::make_pair(sid, flag);
+
+		//_ticksubed_raw_codes.insert(std::string(stdCode, length));
 	}
 }
 
@@ -683,32 +840,14 @@ void WtEngine::load_fees(const char* filename)
 
 	if (!StdFile::exists(filename))
 	{
-		WTSLogger::error("Fee templates file %s not exists", filename);
+		WTSLogger::error("Fee templates file {} not exists", filename);
 		return;
 	}
 
-
-	std::string content;
-	StdFile::read_file_content(filename, content);
-	if (content.empty())
+	WTSVariant* cfg = WTSCfgLoader::load_from_file(filename);
+	if (cfg == NULL)
 	{
-		WTSLogger::error("Fee templates file %s is empty", filename);
-		return;
-	}
-
-	rj::Document root;
-	root.Parse(content.c_str());
-
-	if (root.HasParseError())
-	{
-		WTSLogger::error("Fee templates file %s parsing failed", filename);
-		return;
-	}
-
-	WTSVariant* cfg = WTSVariant::createObject();
-	if (!jsonToVariant(root, cfg))
-	{
-		WTSLogger::error("Fee templates file %s converting failed", filename);
+		WTSLogger::error("Fee templates file {} loading failed", filename);
 		return;
 	}
 
@@ -725,21 +864,22 @@ void WtEngine::load_fees(const char* filename)
 
 	cfg->release();
 
-	WTSLogger::info("%u fee templates loaded", _fee_map.size());
+	WTSLogger::info("{} fee templates loaded", _fee_map.size());
 }
 
 double WtEngine::calc_fee(const char* stdCode, double price, double qty, uint32_t offset)
 {
-	std::string stdPID = CodeHelper::stdCodeToStdCommID(stdCode);
+	CodeHelper::CodeInfo codeInfo = CodeHelper::extractStdCode(stdCode, _hot_mgr);
+	const char* stdPID = codeInfo.stdCommID();
 	auto it = _fee_map.find(stdPID);
 	if (it == _fee_map.end())
 	{
-		WTSLogger::warn("No fee template of instrumnet %s founde, return 0.0 as default", stdCode);
+		WTSLogger::warn("Fee template of {} not found, return 0.0 as default", stdPID);
 		return 0.0;
 	}
 
 	double ret = 0.0;
-	WTSCommodityInfo* commInfo = _base_data_mgr->getCommodity(stdPID.c_str());
+	WTSCommodityInfo* commInfo = _base_data_mgr->getCommodity(stdPID);
 	const FeeItem& fItem = it->second;
 	if(fItem._by_volume)
 	{
@@ -766,8 +906,30 @@ double WtEngine::calc_fee(const char* stdCode, double price, double qty, uint32_
 	return (int32_t)(ret * 100 + 0.5) / 100.0;
 }
 
-void WtEngine::append_signal(const char* stdCode, double qty)
+void WtEngine::append_signal(const char* stdCode, double qty, bool bStandBy /* = true */)
 {
+	/*
+	 *	By Wesley @ 2021.12.16
+	 *	这里发现一个问题，就是组合的理论成交价和策略的理论成交价不一致
+	 *	检查以后发现，策略的理论成交价会在下一个tick更新
+	 *	但是组合的理论成交价这一个tick就直接更新了
+	 *	这就导致组合成交价永远比策略提前一个tick
+	 *	这里做一个修正，等下一个tick进来，触发signal
+	 *	如果是bar内触发的，bStandBy为false，则直接修改持仓
+	 */
+	double curPx = get_cur_price(stdCode);
+	if(bStandBy || decimal::eq(curPx, 0.0))
+	{
+		SigInfo& sInfo = _sig_map[stdCode];
+		sInfo._volume = qty;
+		sInfo._gentime = (uint64_t)_cur_date * 1000000000 + (uint64_t)_cur_raw_time * 100000 + _cur_secs;
+	}
+	else
+	{
+		do_set_position(stdCode, qty);
+	}
+
+	/*
 	double curPx = get_cur_price(stdCode);
 	if(decimal::eq(curPx, 0.0))
 	{
@@ -779,12 +941,16 @@ void WtEngine::append_signal(const char* stdCode, double qty)
 	{
 		do_set_position(stdCode, qty);
 	}
+	*/
 }
 
-void WtEngine::do_set_position(const char* stdCode, double qty)
+void WtEngine::do_set_position(const char* stdCode, double qty, double curPx /* = -1 */)
 {
 	PosInfo& pInfo = _pos_map[stdCode];
-	double curPx = get_cur_price(stdCode);
+
+	if(decimal::lt(curPx, 0))
+		curPx = get_cur_price(stdCode);
+
 	uint64_t curTm = (uint64_t)_cur_date * 10000 + _cur_time;
 	uint32_t curTDate = _cur_tdate;
 
@@ -793,7 +959,8 @@ void WtEngine::do_set_position(const char* stdCode, double qty)
 
 	double diff = qty - pInfo._volume;
 
-	WTSCommodityInfo* commInfo = _base_data_mgr->getCommodity(CodeHelper::stdCodeToStdCommID(stdCode).c_str());
+	CodeHelper::CodeInfo codeInfo = CodeHelper::extractStdCode(stdCode, _hot_mgr);
+	WTSCommodityInfo* commInfo = _base_data_mgr->getCommodity(codeInfo._exchg, codeInfo._product);
 
 	WTSFundStruct& fundInfo = _port_fund->fundInfo();
 
@@ -812,6 +979,8 @@ void WtEngine::do_set_position(const char* stdCode, double qty)
 		double fee = calc_fee(stdCode, curPx, abs(qty), 0);
 		fundInfo._fees += fee;
 		fundInfo._balance -= fee;
+
+		log_trade(stdCode, dInfo._long, true, curTm, curPx, abs(diff), fee);
 	}
 	else
 	{//持仓方向和目标仓位方向不一致, 需要平仓
@@ -824,6 +993,12 @@ void WtEngine::do_set_position(const char* stdCode, double qty)
 		for (auto it = pInfo._details.begin(); it != pInfo._details.end(); it++)
 		{
 			DetailInfo& dInfo = *it;
+			if (decimal::eq(dInfo._volume, 0))
+			{
+				count++;
+				continue;
+			}
+
 			double maxQty = min(dInfo._volume, left);
 			if (decimal::eq(maxQty, 0))
 				continue;
@@ -846,6 +1021,11 @@ void WtEngine::do_set_position(const char* stdCode, double qty)
 			double fee = calc_fee(stdCode, curPx, maxQty, dInfo._opentdate == curTDate ? 2 : 1);
 			fundInfo._fees += fee;
 			fundInfo._balance -= fee;
+
+			//这里写成交记录
+			log_trade(stdCode, dInfo._long, false, curTm, curPx, maxQty, fee);
+			//这里写平仓记录
+			log_close(stdCode, dInfo._long, dInfo._opentime, dInfo._price, curTm, curPx, maxQty, profit, pInfo._closeprofit);
 
 			if (left == 0)
 				break;
@@ -877,10 +1057,10 @@ void WtEngine::do_set_position(const char* stdCode, double qty)
 			double fee = calc_fee(stdCode, curPx, abs(qty), 0);
 			fundInfo._fees += fee;
 			fundInfo._balance -= fee;
+
+			log_trade(stdCode, dInfo._long, true, curTm, curPx, abs(left), fee);
 		}
 	}
-
-	save_datas();
 }
 
 void WtEngine::push_task(TaskItem task)
@@ -947,7 +1127,7 @@ bool WtEngine::init_riskmon(WTSVariant* cfg)
 	DllHandle hInst = DLLHelper::load_library(dllpath.c_str());
 	if (hInst == NULL)
 	{
-		WTSLogger::info2("risk", "Riskmon module %s loading failed", dllpath.c_str());
+		WTSLogger::log_by_cat("risk", LL_ERROR, "Riskmon module {} loading failed", dllpath.c_str());
 		return false;
 	}
 
@@ -955,7 +1135,7 @@ bool WtEngine::init_riskmon(WTSVariant* cfg)
 	if (creator == NULL)
 	{
 		DLLHelper::free_library(hInst);
-		WTSLogger::info2("risk", "Riskmon module %s is not compatible", module.c_str());
+		WTSLogger::log_by_cat("risk", LL_ERROR, "Riskmon module {} is not compatible", module.c_str());
 		return false;
 	}
 
@@ -971,4 +1151,60 @@ bool WtEngine::init_riskmon(WTSVariant* cfg)
 	_risk_mon->self()->init(this, cfg);
 
 	return true;
+}
+
+void WtEngine::init_outputs()
+{
+	std::string folder = WtHelper::getPortifolioDir();
+	std::string filename = folder + "trades.csv";
+	_trade_logs.reset(new BoostFile());
+	{
+		bool isNewFile = !BoostFile::exists(filename.c_str());
+		_trade_logs->create_or_open_file(filename.c_str());
+		if (isNewFile)
+		{
+			_trade_logs->write_file("code,time,direct,action,price,qty,fee\n");
+		}
+		else
+		{
+			_trade_logs->seek_to_end();
+		}
+	}
+
+	filename = folder + "closes.csv";
+	_close_logs.reset(new BoostFile());
+	{
+		bool isNewFile = !BoostFile::exists(filename.c_str());
+		_close_logs->create_or_open_file(filename.c_str());
+		if (isNewFile)
+		{
+			_close_logs->write_file("code,direct,opentime,openprice,closetime,closeprice,qty,profit,totalprofit\n");
+		}
+		else
+		{
+			_close_logs->seek_to_end();
+		}
+	}
+}
+
+void WtEngine::log_trade(const char* stdCode, bool isLong, bool isOpen, uint64_t curTime, double price, double qty, double fee /* = 0.0 */)
+{
+	if (_trade_logs)
+	{
+		std::stringstream ss;
+		ss << stdCode << "," << curTime << "," << (isLong ? "LONG" : "SHORT") << "," << (isOpen ? "OPEN" : "CLOSE") << "," << price << "," << qty << "," << fee << "\n";
+		_trade_logs->write_file(ss.str());
+	}
+}
+
+void WtEngine::log_close(const char* stdCode, bool isLong, uint64_t openTime, double openpx, uint64_t closeTime, double closepx, double qty, double profit, double totalprofit /* = 0 */)
+{
+	if (_close_logs)
+	{
+		std::stringstream ss;
+		ss << stdCode << "," << (isLong ? "LONG" : "SHORT") << "," << openTime << "," << openpx
+			<< "," << closeTime << "," << closepx << "," << qty << "," << profit << ","
+			<< totalprofit << "\n";
+		_close_logs->write_file(ss.str());
+	}
 }

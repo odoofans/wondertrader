@@ -10,11 +10,11 @@
 #pragma once
 #include "../Includes/IBaseDataMgr.h"
 #include "../Includes/WTSCollection.hpp"
-
 #include "../Includes/FasterDefs.h"
 
-USING_NS_OTP;
-typedef faster_hashmap<std::string, TradingDayTpl>	TradingDayTplMap;
+USING_NS_WTP;
+
+typedef wt_hashmap<std::string, TradingDayTpl>	TradingDayTplMap;
 
 typedef WTSHashMap<std::string>		WTSContractList;
 typedef WTSHashMap<std::string>		WTSExchgContract;
@@ -23,9 +23,7 @@ typedef WTSHashMap<std::string>		WTSContractMap;
 typedef WTSHashMap<std::string>		WTSSessionMap;
 typedef WTSHashMap<std::string>		WTSCommodityMap;
 
-typedef faster_hashset<std::string> CodeSet;
-typedef faster_hashmap<std::string, CodeSet> SessionCodeMap;
-
+typedef wt_hashmap<std::string, CodeSet> SessionCodeMap;
 
 class WTSBaseDataMgr : public IBaseDataMgr
 {
@@ -36,7 +34,6 @@ public:
 public:
 	virtual WTSCommodityInfo*	getCommodity(const char* stdPID) override;
 	virtual WTSCommodityInfo*	getCommodity(const char* exchg, const char* pid) override;
-	virtual WTSCommodityInfo*	getCommodity(WTSContractInfo* ct) override;
 
 	virtual WTSContractInfo*	getContract(const char* code, const char* exchg = "") override;
 	virtual WTSArray*			getContracts(const char* exchg = "") override;

@@ -15,7 +15,7 @@
 #include "../Share/BoostFile.hpp"
 #include "../Share/StdUtils.hpp"
 
-NS_OTP_BEGIN
+NS_WTP_BEGIN
 class WTSVariant;
 class ActionPolicyMgr;
 class WTSContractInfo;
@@ -24,6 +24,8 @@ class WtLocalExecuter;
 class EventNotifier;
 
 class ITrdNotifySink;
+
+typedef std::function<void(const char*, bool, double, double, double, double)> FuncEnumChnlPosCallBack;
 
 class TraderAdapter : public ITraderSpi
 {
@@ -98,6 +100,7 @@ public:
 
 public:
 	bool init(const char* id, WTSVariant* params, IBaseDataMgr* bdMgr, ActionPolicyMgr* policyMgr);
+	bool initExt(const char* id, ITraderApi* api, IBaseDataMgr* bdMgr, ActionPolicyMgr* policyMgr);
 
 	void release();
 
@@ -111,6 +114,10 @@ public:
 	{
 		_sinks.insert(sink);
 	}
+
+	inline bool isReady() const { return _state == AS_ALLREADY; }
+
+	void queryFund();
 
 private:
 	uint32_t doEntrust(WTSEntrust* entrust);
@@ -130,8 +137,10 @@ private:
 
 	void	saveData(WTSArray* ayFunds = NULL);
 
+	inline void updateUndone(const char* stdCode, double qty, bool bOuput = true);
+
 public:
-	double getPosition(const char* stdCode, int32_t flag = 3);
+	double getPosition(const char* stdCode, bool bValidOnly, int32_t flag = 3);
 	OrderMap* getOrders(const char* stdCode);
 	double getUndoneQty(const char* stdCode)
 	{
@@ -142,13 +151,15 @@ public:
 		return 0;
 	}
 
-	uint32_t openLong(const char* stdCode, double price, double qty);
-	uint32_t openShort(const char* stdCode, double price, double qty);
-	uint32_t closeLong(const char* stdCode, double price, double qty, bool isToday = false);
-	uint32_t closeShort(const char* stdCode, double price, double qty, bool isToday = false);
+	void enumPosition(FuncEnumChnlPosCallBack cb);
+
+	uint32_t openLong(const char* stdCode, double price, double qty, int flag, WTSContractInfo* cInfo = NULL);
+	uint32_t openShort(const char* stdCode, double price, double qty, int flag, WTSContractInfo* cInfo = NULL);
+	uint32_t closeLong(const char* stdCode, double price, double qty, bool isToday, int flag, WTSContractInfo* cInfo = NULL);
+	uint32_t closeShort(const char* stdCode, double price, double qty, bool isToday, int flag, WTSContractInfo* cInfo = NULL);
 	
-	OrderIDs buy(const char* stdCode, double price, double qty);
-	OrderIDs sell(const char* stdCode, double price, double qty);
+	OrderIDs buy(const char* stdCode, double price, double qty, int flag, bool bForceClose, WTSContractInfo* cInfo = NULL);
+	OrderIDs sell(const char* stdCode, double price, double qty, int flag, bool bForceClose, WTSContractInfo* cInfo = NULL);
 	bool	cancel(uint32_t localid);
 	OrderIDs cancel(const char* stdCode, bool isBuy, double qty = 0);
 
@@ -156,6 +167,18 @@ public:
 
 	bool	checkCancelLimits(const char* stdCode);
 	bool	checkOrderLimits(const char* stdCode);
+
+	bool	checkSelfMatch(const char* stdCode, WTSTradeInfo* tInfo);
+
+	inline	bool isSelfMatched(const char* stdCode)
+	{
+		//如果忽略自成交，则直接返回false
+		if (_ignore_sefmatch)
+			return false;
+
+		auto it = _self_matches.find(stdCode);
+		return it != _self_matches.end();
+	}
 
 public:
 	//////////////////////////////////////////////////////////////////////////
@@ -184,12 +207,14 @@ public:
 
 	virtual IBaseDataMgr* getBaseDataMgr() override;
 
-	virtual void handleTraderLog(WTSLogLevel ll, const char* format, ...) override;
+	virtual void handleTraderLog(WTSLogLevel ll, const char* message) override;
 
 private:
 	WTSVariant*			_cfg;
 	std::string			_id;
 	std::string			_order_pattern;
+
+	uint32_t			_trading_day;
 
 	ITraderApi*			_trader_api;
 	FuncDeleteTrader	_remover;
@@ -197,32 +222,41 @@ private:
 
 	EventNotifier*		_notifier;
 
-	faster_hashset<ITrdNotifySink*>	_sinks;
+	wt_hashset<ITrdNotifySink*>	_sinks;
 
 	IBaseDataMgr*		_bd_mgr;
 	ActionPolicyMgr*	_policy_mgr;
 
-	faster_hashmap<std::string, PosItem> _positions;
+	wt_hashmap<std::string, PosItem> _positions;
 
 	StdUniqueMutex _mtx_orders;
 	OrderMap*		_orders;
-	faster_hashset<std::string> _orderids;	//主要用于标记有没有处理过该订单
+	wt_hashset<std::string> _orderids;	//主要用于标记有没有处理过该订单
 
-	faster_hashmap<std::string, double> _undone_qty;	//未完成数量
+	wt_hashmap<std::string, std::string>		_trade_refs;	//用于记录成交单和订单的匹配
+	wt_hashset<std::string>					_self_matches;	//自成交的合约
+
+	/*
+	 *	By Wesley @ 2023.03.16
+	 *	加一个控制，这样自成交发生以后，还可以恢复交易
+	 */
+	bool			_ignore_sefmatch;		//忽略自成交限制
+
+	wt_hashmap<std::string, double> _undone_qty;	//未完成数量
 
 	typedef WTSHashMap<std::string>	TradeStatMap;
 	TradeStatMap*	_stat_map;	//统计数据
 
 	//这两个缓存时间内的容器,主要是为了控制瞬间流量而设置的
 	typedef std::vector<uint64_t> TimeCacheList;
-	typedef faster_hashmap<std::string, TimeCacheList> CodeTimeCacheMap;
+	typedef wt_hashmap<std::string, TimeCacheList> CodeTimeCacheMap;
 	CodeTimeCacheMap	_order_time_cache;	//下单时间缓存
 	CodeTimeCacheMap	_cancel_time_cache;	//撤单时间缓存
 
 	//如果被风控了,就会进入到排除队列
-	faster_hashset<std::string>	_exclude_codes;
+	wt_hashset<std::string>	_exclude_codes;
 	
-	typedef faster_hashmap<std::string, RiskParams>	RiskParamsMap;
+	typedef wt_hashmap<std::string, RiskParams>	RiskParamsMap;
 	RiskParamsMap	_risk_params_map;
 	bool			_risk_mon_enabled;
 
@@ -233,7 +267,7 @@ private:
 };
 
 typedef std::shared_ptr<TraderAdapter>				TraderAdapterPtr;
-typedef faster_hashmap<std::string, TraderAdapterPtr>	TraderAdapterMap;
+typedef wt_hashmap<std::string, TraderAdapterPtr>	TraderAdapterMap;
 
 
 //////////////////////////////////////////////////////////////////////////
@@ -251,8 +285,10 @@ public:
 
 	bool	addAdapter(const char* tname, TraderAdapterPtr& adapter);
 
+	void	refresh_funds();
+
 private:
 	TraderAdapterMap	_adapters;
 };
 
-NS_OTP_END
+NS_WTP_END

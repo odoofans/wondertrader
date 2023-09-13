@@ -11,7 +11,7 @@
 #include <stdint.h>
 #include "../Includes/WTSMarcos.h"
 
-NS_OTP_BEGIN
+NS_WTP_BEGIN
 
 class ITrdNotifySink
 {
@@ -29,7 +29,7 @@ public:
 	/*
 	 *	持仓更新回调
 	 */
-	virtual void on_position(const char* stdCode, bool isLong, double prevol, double preavail, double newvol, double newavail) {}
+	virtual void on_position(const char* stdCode, bool isLong, double prevol, double preavail, double newvol, double newavail, uint32_t tradingday) {}
 
 	/*
 	 *	交易通道就绪
@@ -45,6 +45,11 @@ public:
 	 *	下单回报
 	 */
 	virtual void on_entrust(uint32_t localid, const char* stdCode, bool bSuccess, const char* message){}
+
+	/*
+	 *	资金回调
+	 */
+	virtual void on_account(const char* currency, double prebalance, double balance, double dynbalance, double avaliable, double closeprofit, double dynprofit, double margin, double fee, double deposit, double withdraw){}
 };
 
-NS_OTP_END
+NS_WTP_END

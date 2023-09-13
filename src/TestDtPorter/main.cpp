@@ -1,17 +1,11 @@
-#include "../WtDtPorter/WtDtPorter.h"
+#define _CRT_SECURE_NO_WARNINGS
 #include "../WtDtHelper/WtDtHelper.h"
-
+#include "../WtDtPorter/WtDtPorter.h"
 #include "../Includes/WTSDataDef.hpp"
 
-void testDtPorter()
+void on_get_bar(WTSBarStruct* bar, WtUInt32 count, bool isLast)
 {
-	initialize("dtcfg.json", "logcfgdt.json");
-	start();
-}
-
-void on_get_bar(WTSBarStruct* bar, bool isLast)
-{
-	printf("%u\r\n", bar->time);
+	printf("%u.%llu\r\n", bar->date, bar->time);
 }
 
 void on_bar_cnt(WtUInt32 dataCnt)
@@ -46,7 +40,14 @@ void testDtHelper()
 	resample_bars("IC2009.dsb", on_get_bar, on_bar_cnt, 202001010931, 202009181500, "m1", 5, session_str, on_log);
 }
 
-void main()
+void test_porter()
 {
-	testDtHelper();
+	initialize("dtcfg.json", "logcfgdt.json", true, true);
+	start();
+}
+
+int main()
+{
+	test_porter();
+    return 0;
 }

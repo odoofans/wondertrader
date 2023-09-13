@@ -22,8 +22,10 @@
 #include "../Share/StdUtils.hpp"
 #include "../Share/DLLHelper.hpp"
 
+#include "../Share/BoostFile.hpp"
 
-NS_OTP_BEGIN
+
+NS_WTP_BEGIN
 class WTSSessionInfo;
 class WTSCommodityInfo;
 class WTSContractInfo;
@@ -39,8 +41,10 @@ class WTSTickSlice;
 class WTSKlineSlice;
 class WTSPortFundInfo;
 
-class WtDataManager;
+class WtDtMgr;
 class TraderAdapterMgr;
+
+class EventNotifier;
 
 typedef std::function<void()>	TaskItem;
 
@@ -95,6 +99,7 @@ public:
 	WTSSessionInfo*		get_session_info(const char* sid, bool isCode = false);
 	WTSCommodityInfo*	get_commodity_info(const char* stdCode);
 	WTSContractInfo*	get_contract_info(const char* stdCode);
+	std::string			get_rawcode(const char* stdCode);
 
 	WTSTickData*	get_last_tick(uint32_t sid, const char* stdCode);
 	WTSTickSlice*	get_tick_slice(uint32_t sid, const char* stdCode, uint32_t count);
@@ -103,6 +108,17 @@ public:
 	void sub_tick(uint32_t sid, const char* code);
 
 	double get_cur_price(const char* stdCode);
+
+	double get_day_price(const char* stdCode, int flag = 0);
+
+	/*
+	 *	获取复权因子
+	 *	@stdCode	合约代码
+	 *	@commInfo	品种信息
+	 */
+	double get_exright_factor(const char* stdCode, WTSCommodityInfo* commInfo = NULL);
+
+	uint32_t get_adjusting_flag();
 
 	double calc_fee(const char* stdCode, double price, double qty, uint32_t offset);
 
@@ -124,7 +140,7 @@ public:
 
 	virtual bool isInTrading() override;
 
-	virtual void writeRiskLog(const char* fmt, ...) override;
+	virtual void writeRiskLog(const char* message) override;
 
 	virtual uint32_t	getCurDate() override;
 	virtual uint32_t	getCurTime() override;
@@ -136,7 +152,7 @@ public:
 	virtual void handle_push_quote(WTSTickData* newTick, uint32_t hotFlag) override;
 
 public:
-	virtual void init(WTSVariant* cfg, IBaseDataMgr* bdMgr, WtDataManager* dataMgr, IHotMgr* hotMgr);
+	virtual void init(WTSVariant* cfg, IBaseDataMgr* bdMgr, WtDtMgr* dataMgr, IHotMgr* hotMgr, EventNotifier* notifier);
 
 	virtual void run(bool bAsync = false) = 0;
 
@@ -156,9 +172,9 @@ protected:
 
 	void		save_datas();
 
-	void		append_signal(const char* stdCode, double qty);
+	void		append_signal(const char* stdCode, double qty, bool bStandBy);
 
-	void		do_set_position(const char* stdCode, double qty);
+	void		do_set_position(const char* stdCode, double qty, double curPx = -1);
 
 	void		task_loop();
 
@@ -168,25 +184,37 @@ protected:
 
 	bool		init_riskmon(WTSVariant* cfg);
 
+private:
+	void		init_outputs();
+	inline void	log_trade(const char* stdCode, bool isLong, bool isOpen, uint64_t curTime, double price, double qty, double fee = 0.0);
+	inline void	log_close(const char* stdCode, bool isLong, uint64_t openTime, double openpx, uint64_t closeTime, double closepx, double qty,
+		double profit, double totalprofit = 0);
 
 protected:
-	uint32_t		_cur_date;	//当前日期
+	uint32_t		_cur_date;		//当前日期
 	uint32_t		_cur_time;		//当前时间, 是1分钟线时间, 比如0900, 这个时候的1分钟线是0901, _cur_time也就是0901, 这个是为了CTA里面方便
 	uint32_t		_cur_raw_time;	//当前真实时间
-	uint32_t		_cur_secs;	//当前秒数, 包含毫秒
-	uint32_t		_cur_tdate;	//当前交易日
+	uint32_t		_cur_secs;		//当前秒数, 包含毫秒
+	uint32_t		_cur_tdate;		//当前交易日
+
+	uint32_t		_fund_udt_span;	//组合资金更新时间间隔
 
 	IBaseDataMgr*	_base_data_mgr;	//基础数据管理器
 	IHotMgr*		_hot_mgr;		//主力管理器
-	WtDataManager*	_data_mgr;		//数据管理器
+	WtDtMgr*		_data_mgr;		//数据管理器
 	IEngineEvtListener*	_evt_listener;
 
-	typedef faster_hashset<uint32_t> SIDSet;
-	typedef faster_hashmap<std::string, SIDSet>	StraSubMap;
+	//By Wesley @ 2022.02.07
+	//tick数据订阅项，first是contextid，second是订阅选项，0-原始订阅，1-前复权，2-后复权
+	typedef std::pair<uint32_t, uint32_t> SubOpt;
+	typedef wt_hashmap<uint32_t, SubOpt> SubList;
+	typedef wt_hashmap<std::string, SubList>	StraSubMap;
 	StraSubMap		_tick_sub_map;	//tick数据订阅表
 	StraSubMap		_bar_sub_map;	//K线数据订阅表
 
-	faster_hashset<std::string>		_ticksubed_raw_codes;	//tick订阅表（真实代码模式）
+	//By Wesley @ 2022.02.07 
+	//这个好像没有用到，不需要了
+	//wt_hashset<std::string>		_ticksubed_raw_codes;	//tick订阅表（真实代码模式）
 	
 
 	//////////////////////////////////////////////////////////////////////////
@@ -202,12 +230,13 @@ protected:
 			_gentime = 0;
 		}
 	}SigInfo;
-	typedef faster_hashmap<std::string, SigInfo>	SignalMap;
+	typedef wt_hashmap<std::string, SigInfo>	SignalMap;
 	SignalMap		_sig_map;
 
 	//////////////////////////////////////////////////////////////////////////
 	//信号过滤器
 	WtFilterMgr		_filter_mgr;
+	EventNotifier*	_notifier;
 
 	//////////////////////////////////////////////////////////////////////////
 	//手续费模板
@@ -223,7 +252,7 @@ protected:
 			memset(this, 0, sizeof(_FeeItem));
 		}
 	} FeeItem;
-	typedef faster_hashmap<std::string, FeeItem>	FeeMap;
+	typedef wt_hashmap<std::string, FeeItem>	FeeMap;
 	FeeMap		_fee_map;
 	
 
@@ -261,12 +290,12 @@ protected:
 			_dynprofit = 0;
 		}
 	} PosInfo;
-	typedef faster_hashmap<std::string, PosInfo> PositionMap;
+	typedef wt_hashmap<std::string, PosInfo> PositionMap;
 	PositionMap		_pos_map;
 
 	//////////////////////////////////////////////////////////////////////////
 	//
-	typedef faster_hashmap<std::string, double> PriceMap;
+	typedef wt_hashmap<std::string, double> PriceMap;
 	PriceMap		_price_map;
 
 	//后台任务线程, 把风控和资金, 持仓更新都放到这个线程里去
@@ -274,7 +303,7 @@ protected:
 	StdThreadPtr	_thrd_task;
 	TaskQueue		_task_queue;
 	StdUniqueMutex	_mtx_task;
-	StdCondVariable		_cond_task;
+	StdCondVariable	_cond_task;
 	bool			_terminated;
 
 	typedef struct _RiskMonFactInfo
@@ -291,5 +320,13 @@ protected:
 	uint32_t		_risk_date;
 
 	TraderAdapterMgr*	_adapter_mgr;
+
+	BoostFilePtr	_trade_logs;
+	BoostFilePtr	_close_logs;
+
+	wt_hashmap<std::string, double>	_factors_cache;
+
+	//用于标记是否可以推送tickle
+	bool			_ready;
 };
-NS_OTP_END
+NS_WTP_END

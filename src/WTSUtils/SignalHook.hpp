@@ -1,7 +1,6 @@
 #pragma once
 #include <signal.h>
 #include "./StackTracer/StackTracer.h"
-
 TracerLogCallback g_cbSignalLog = NULL;
 
 void handle_signal(int signum)
@@ -46,6 +45,7 @@ void handle_signal(int signum)
 		exit(signum);
 	case SIGINT:       // terminate process    interrupt program
 		g_cbSignalLog("app interrupted");
+		exit(signum);
 		break;
 	case SIGTERM:      // terminate process    software termination signal
 		g_cbSignalLog("app terminated");

@@ -13,12 +13,11 @@
 
 #include <exception>
 
-#include "../Share/StrUtil.hpp"
 #include "../Includes/WTSContractInfo.hpp"
 
 
-CtaStraContext::CtaStraContext(WtCtaEngine* engine, const char* name)
-	: CtaStraBaseCtx(engine, name)
+CtaStraContext::CtaStraContext(WtCtaEngine* engine, const char* name, int32_t slippage)
+	: CtaStraBaseCtx(engine, name, slippage)
 {
 }
 
@@ -41,6 +40,8 @@ void CtaStraContext::on_init()
 
 	if (_strategy)
 		_strategy->on_init(this);
+
+	dump_chart_info();
 }
 
 void CtaStraContext::on_session_begin(uint32_t uTDate)
@@ -61,15 +62,23 @@ void CtaStraContext::on_session_end(uint32_t uTDate)
 
 void CtaStraContext::on_tick_updated(const char* code, WTSTickData* newTick)
 {
+	auto it = _tick_subs.find(code);
+	if (it == _tick_subs.end())
+		return;
+
 	if (_strategy)
 		_strategy->on_tick(this, code, newTick);
 }
 
-void CtaStraContext::on_mainkline_updated(uint32_t curDate, uint32_t curTime)
+void CtaStraContext::on_calculate(uint32_t curDate, uint32_t curTime)
 {
 	if (_strategy)
 		_strategy->on_schedule(this, curDate, curTime);
 }
 
-
+void CtaStraContext::on_condition_triggered(const char* stdCode, double target, double price, const char* usertag)
+{
+	if (_strategy)
+		_strategy->on_condition_triggered(this, stdCode, target, price, usertag);
+}
 

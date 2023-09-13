@@ -11,7 +11,7 @@
 #include "../Includes/WTSDataDef.hpp"
 #include "../Includes/WTSCollection.hpp"
 
-NS_OTP_BEGIN
+NS_WTP_BEGIN
 class WTSTickData;
 class WTSHisTickData;
 class WTSVariant;
@@ -50,12 +50,13 @@ public:
 
 	/*
 	 *	获取仓位
-	 *	code	合约代码
-	 *	flag	操作标记 1-多仓, 2-空仓, 3-多空轧平
+	 *	code		合约代码
+	 *	validOnly	只读取可用持仓
+	 *	flag		操作标记 1-多仓, 2-空仓, 3-多空轧平
 	 *	
 	 *	返回值	轧平后的仓位: 多仓>0, 空仓<0
 	 */
-	virtual double getPosition(const char* stdCode, int32_t flag = 3) = 0;
+	virtual double getPosition(const char* stdCode, bool validOnly = true, int32_t flag = 3) = 0;
 
 	/*
 	 *	获取未完成订单
@@ -81,7 +82,7 @@ public:
 	 *
 	 *	返回值	本地订单号数组: 一个买入操作可能会拆成最多3个订单发出
 	 */
-	virtual OrderIDs buy(const char* stdCode, double price, double qty) = 0;
+	virtual OrderIDs buy(const char* stdCode, double price, double qty, bool bForceClose = false) = 0;
 
 	/*
 	*	卖出接口
@@ -91,7 +92,7 @@ public:
 	*
 	*	返回值	本地订单号数组: 一个买入操作可能会拆成最多3个订单发出
 	*/
-	virtual OrderIDs sell(const char* stdCode, double price, double qty) = 0;
+	virtual OrderIDs sell(const char* stdCode, double price, double qty, bool bForceClose = false) = 0;
 
 	/*
 	 *	根据本地订单号撤单
@@ -115,7 +116,7 @@ public:
 	/*
 	 *	写日志
 	 */
-	virtual void writeLog(const char* fmt, ...) = 0;
+	virtual void writeLog(const char* message) = 0;
 
 	/*
 	 *	获取品种参数
@@ -147,7 +148,7 @@ public:
 class ExecuteUnit
 {
 public:
-	ExecuteUnit() :_ctx(NULL), _code(""){}
+	ExecuteUnit(bool bDiffMode = false) :_ctx(NULL), _code("") {}
 	virtual ~ExecuteUnit(){}
 
 public:
@@ -171,10 +172,16 @@ public:
 public:
 	/*
 	 *	设置新的目标仓位
-	 *	code	合约代码
+	 *	stdCode	合约代码
 	 *	newVol	新的目标仓位
 	 */
 	virtual void set_position(const char* stdCode, double newVol) = 0;
+
+	/*
+	 *	清理全部持仓，锁仓的情况下也要清理
+	 *	stdCode	合约代码	
+	 */
+	virtual void clear_all_position(const char* stdCode){}
 
 	/*
 	 *	tick数据回调
@@ -217,6 +224,11 @@ public:
 	 */
 	virtual void on_channel_lost() = 0;
 
+	/*
+	 *	资金回报，只在交易通道初始化完成以后调用一次
+	 */
+	virtual void on_account(const char* currency, double prebalance, double balance, double dynbalance, double avaliable, double closeprofit, double dynprofit, double margin, double fee, double deposit, double withdraw) {}
+
 protected:
 	ExecuteContext*	_ctx;
 	std::string		_code;
@@ -249,6 +261,16 @@ public:
 	virtual ExecuteUnit* createExeUnit(const char* name) = 0;
 
 	/*
+	 *	根据名称创建差量执行单元
+	 */
+	virtual ExecuteUnit* createDiffExeUnit(const char* name) = 0;
+
+	/*
+	 *	根据名称创建差量执行单元
+	 */
+	virtual ExecuteUnit* createArbiExeUnit(const char* name) = 0;
+
+	/*
 	 *	删除执行单元
 	 */
 	virtual bool deleteExeUnit(ExecuteUnit* unit) = 0;
@@ -259,4 +281,4 @@ typedef IExecuterFact* (*FuncCreateExeFact)();
 //删除执行工厂
 typedef void(*FuncDeleteExeFact)(IExecuterFact* &fact);
 
-NS_OTP_END
+NS_WTP_END

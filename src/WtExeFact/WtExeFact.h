@@ -9,7 +9,7 @@
 #pragma once
 #include "../Includes/ExecuteDefs.h"
 
-USING_NS_OTP;
+USING_NS_WTP;
 
 class WtExeFact : public IExecuterFact
 {
@@ -22,6 +22,10 @@ public:
 	virtual void enumExeUnit(FuncEnumUnitCallback cb) override;
 
 	virtual ExecuteUnit* createExeUnit(const char* name) override;
+
+	virtual ExecuteUnit* createDiffExeUnit(const char* name) override;
+
+	virtual ExecuteUnit* createArbiExeUnit(const char* name) override;
 
 	virtual bool deleteExeUnit(ExecuteUnit* unit) override;
 

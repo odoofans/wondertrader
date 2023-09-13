@@ -2,8 +2,8 @@
 #include "../Includes/SelStrategyDefs.h"
 
 
-SelStraContext::SelStraContext(WtSelEngine* engine, const char* name)
-	: SelStraBaseCtx(engine, name)
+SelStraContext::SelStraContext(WtSelEngine* engine, const char* name, int32_t slippage)
+	: SelStraBaseCtx(engine, name, slippage)
 	, _strategy(NULL)
 {
 }
@@ -45,6 +45,10 @@ void SelStraContext::on_bar_close(const char* stdCode, const char* period, WTSBa
 
 void SelStraContext::on_tick_updated(const char* stdCode, WTSTickData* newTick)
 {
+	auto it = _tick_subs.find(stdCode);
+	if (it == _tick_subs.end())
+		return;
+
 	if (_strategy)
 		_strategy->on_tick(this, stdCode, newTick);
 }

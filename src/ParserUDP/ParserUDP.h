@@ -17,7 +17,7 @@
 #include <boost/array.hpp>
 #include <boost/asio/io_service.hpp>
 
-USING_NS_OTP;
+USING_NS_WTP;
 using namespace boost::asio;
 
 class ParserUDP : public IParserApi
@@ -28,7 +28,7 @@ public:
 
 	//IQuoteParser ½Ó¿Ú
 public:
-	virtual bool init(WTSParams* config) override;
+	virtual bool init(WTSVariant* config) override;
 
 	virtual void release() override;
 
@@ -48,7 +48,7 @@ private:
 	void	handle_read(const boost::system::error_code& e, std::size_t bytes_transferred, bool isBroad);
 	void	handle_write(const boost::system::error_code& e);
 
-	bool	reconnect();
+	bool	reconnect(uint32_t flag = 3);
 
 	void	subscribe();
 
@@ -64,6 +64,7 @@ private:
 	std::string	_hots;
 	int			_bport;
 	int			_sport;
+	uint32_t	_gpsize;
 
 	ip::udp::endpoint	_broad_ep;
 	ip::udp::endpoint	_server_ep;
@@ -73,11 +74,12 @@ private:
 
 	ip::udp::socket*	_b_socket;
 	ip::udp::socket*	_s_socket;
+	bool				_s_inited;
 
 	boost::array<char, 1024> _b_buffer;
 	boost::array<char, 1024> _s_buffer;
 
-	IParserSpi*		_sink;
+	IParserSpi*				_sink;
 	bool					_stopped;
 	bool					_connecting;
 
@@ -85,6 +87,7 @@ private:
 
 	StdThreadPtr			_thrd_parser;
 
+	StdUniqueMutex			_mtx_queue;
 	std::queue<std::string>	_send_queue;
 };
 

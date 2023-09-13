@@ -9,9 +9,10 @@
  */
 #include "HftStrategyMgr.h"
 
+#include <boost/filesystem.hpp>
+
 #include "../Share/StrUtil.hpp"
 #include "../Share/StdUtils.hpp"
-#include "../Share/BoostFile.hpp"
 
 #include "../WTSTools/WTSLogger.h"
 
@@ -29,7 +30,7 @@ bool HftStrategyMgr::loadFactories(const char* path)
 {
 	if (!StdFile::exists(path))
 	{
-		WTSLogger::error("Directory %s of HFT strategy factory not exists", path);
+		WTSLogger::error("Directory {} of HFT strategy factory not exists", path);
 		return false;
 	}
 
@@ -70,7 +71,7 @@ bool HftStrategyMgr::loadFactories(const char* path)
 			fInfo._creator = creator;
 			fInfo._remover = (FuncDeleteHftStraFact)DLLHelper::get_symbol(hInst, "deleteStrategyFact");
 			fInfo._fact = pFact;
-			WTSLogger::info("HFT strategy factory[%s] loaded", pFact->getName());
+			WTSLogger::info("HFT strategy factory[{}] loaded", pFact->getName());
 
 			count++;
 		}
@@ -81,7 +82,7 @@ bool HftStrategyMgr::loadFactories(const char* path)
 		}
 	}
 
-	WTSLogger::info("%u HFT strategy factories in directory[%s] loaded", count, path);
+	WTSLogger::info("{} HFT strategy factories in directory[{}] loaded", count, path);
 
 	return true;
 }

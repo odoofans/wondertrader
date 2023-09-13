@@ -12,6 +12,9 @@
 
 #include "PorterDefs.h"
 
+#include "../Includes/ILogHandler.h"
+#include "../Includes/IDataReader.h"
+
 #include "../WtCore/EventNotifier.h"
 #include "../WtCore/CtaStrategyMgr.h"
 #include "../WtCore/HftStrategyMgr.h"
@@ -20,21 +23,23 @@
 #include "../WtCore/WtHftEngine.h"
 #include "../WtCore/WtSelEngine.h"
 #include "../WtCore/WtLocalExecuter.h"
+#include "../WtCore/WtDiffExecuter.h"
 #include "../WtCore/WtDistExecuter.h"
+#include "../WtCore/WtArbiExecuter.h"
 #include "../WtCore/TraderAdapter.h"
 #include "../WtCore/ParserAdapter.h"
-#include "../WtCore/WtDataManager.h"
+#include "../WtCore/WtDtMgr.h"
 #include "../WtCore/ActionPolicyMgr.h"
 
 #include "../WTSTools/WTSHotMgr.h"
 #include "../WTSTools/WTSBaseDataMgr.h"
 
-NS_OTP_BEGIN
+NS_WTP_BEGIN
 class WTSVariant;
 class WtDataStorage;
-NS_OTP_END
+NS_WTP_END
 
-USING_NS_OTP;
+USING_NS_WTP;
 
 typedef enum tagEngineType
 {
@@ -43,11 +48,26 @@ typedef enum tagEngineType
 	ET_SEL			//选股引擎
 } EngineType;
 
-class WtRtRunner : public IEngineEvtListener
+class WtRtRunner : public IEngineEvtListener, public ILogHandler, public IHisDataLoader
 {
 public:
 	WtRtRunner();
 	~WtRtRunner();
+
+public:
+	//////////////////////////////////////////////////////////////////////////
+	//IBtDataLoader
+	virtual bool loadFinalHisBars(void* obj, const char* stdCode, WTSKlinePeriod period, FuncReadBars cb) override;
+
+	virtual bool loadRawHisBars(void* obj, const char* stdCode, WTSKlinePeriod period, FuncReadBars cb) override;
+
+	virtual bool loadAllAdjFactors(void* obj, FuncReadFactors cb) override;
+
+	virtual bool loadAdjFactors(void* obj, const char* stdCode, FuncReadFactors cb) override;
+
+	void feedRawBars(WTSBarStruct* bars, uint32_t count);
+
+	void feedAdjFactors(const char* stdCode, uint32_t* dates, double* factors, uint32_t count);
 
 public:
 	/*
@@ -61,13 +81,11 @@ public:
 
 	void release();
 
-	void dump_bars(const char* stdCode, const char* period, FuncDumpBarsCallback cb, FuncCountDataCallback cbCnt);
-
-	void registerCtaCallbacks(FuncStraInitCallback cbInit, FuncStraTickCallback cbTick, FuncStraCalcCallback cbCalc, FuncStraBarCallback cbBar, FuncSessionEvtCallback cbSessEvt);
+	void registerCtaCallbacks(FuncStraInitCallback cbInit, FuncStraTickCallback cbTick, FuncStraCalcCallback cbCalc, FuncStraBarCallback cbBar, FuncSessionEvtCallback cbSessEvt, FuncStraCondTriggerCallback cbCondTrigger = NULL);
 	void registerSelCallbacks(FuncStraInitCallback cbInit, FuncStraTickCallback cbTick, FuncStraCalcCallback cbCalc, FuncStraBarCallback cbBar, FuncSessionEvtCallback cbSessEvt);
 	void registerHftCallbacks(FuncStraInitCallback cbInit, FuncStraTickCallback cbTick, FuncStraBarCallback cbBar,
 		FuncHftChannelCallback cbChnl, FuncHftOrdCallback cbOrd, FuncHftTrdCallback cbTrd, FuncHftEntrustCallback cbEntrust,
-		FuncStraOrdDtlCallback cbOrdDtl, FuncStraOrdQueCallback cbOrdQue, FuncStraTransCallback cbTrans, FuncSessionEvtCallback cbSessEvt);
+		FuncStraOrdDtlCallback cbOrdDtl, FuncStraOrdQueCallback cbOrdQue, FuncStraTransCallback cbTrans, FuncSessionEvtCallback cbSessEvt, FuncHftPosCallback cbPosition);
 
 	void registerEvtCallback(FuncEventCallback cbEvt);
 
@@ -75,17 +93,31 @@ public:
 
 	void registerExecuterPorter(FuncExecInitCallback cbInit, FuncExecCmdCallback cbExec);
 
+	void		registerExtDataLoader(FuncLoadFnlBars fnlBarLoader, FuncLoadRawBars rawBarLoader, FuncLoadAdjFactors fctLoader, FuncLoadRawTicks tickLoader = NULL)
+	{
+		_ext_fnl_bar_loader = fnlBarLoader;
+		_ext_raw_bar_loader = rawBarLoader;
+		_ext_adj_fct_loader = fctLoader;
+	}
+
 	bool			createExtParser(const char* id);
 	bool			createExtExecuter(const char* id);
 
-	uint32_t		createCtaContext(const char* name);
-	uint32_t		createHftContext(const char* name, const char* trader, bool bAgent);
-	uint32_t		createSelContext(const char* name, uint32_t date, uint32_t time, const char* period, const char* trdtpl = "CHINA", const char* session="TRADING");
+	uint32_t		createCtaContext(const char* name, int32_t slippage);
+	uint32_t		createHftContext(const char* name, const char* trader, bool bAgent, int32_t slippage);
+	uint32_t		createSelContext(const char* name, uint32_t date, uint32_t time, const char* period, int32_t slippage, const char* trdtpl = "CHINA", const char* session="TRADING");
 
 	CtaContextPtr	getCtaContext(uint32_t id);
 	SelContextPtr	getSelContext(uint32_t id);
 	HftContextPtr	getHftContext(uint32_t id);
 	WtEngine*		getEngine(){ return _engine; }
+
+	const char*	get_raw_stdcode(const char* stdCode);
+
+//////////////////////////////////////////////////////////////////////////
+//ILogHandler
+public:
+	virtual void handleLogAppend(WTSLogLevel ll, const char* msg) override;
 
 //////////////////////////////////////////////////////////////////////////
 //扩展Parser
@@ -97,7 +129,7 @@ public:
 	void parser_subscribe(const char* id, const char* code);
 	void parser_unsubscribe(const char* id, const char* code);
 
-	void on_parser_quote(const char* id, WTSTickStruct* curTick, bool bNeedSlice = true);
+	void on_ext_parser_quote(const char* id, WTSTickStruct* curTick, uint32_t uProcFlag);
 
 
 //////////////////////////////////////////////////////////////////////////
@@ -133,12 +165,14 @@ public:
 	void ctx_on_tick(uint32_t id, const char* stdCode, WTSTickData* newTick, EngineType eType = ET_CTA);
 	void ctx_on_calc(uint32_t id, uint32_t curDate, uint32_t curTime, EngineType eType = ET_CTA);
 	void ctx_on_bar(uint32_t id, const char* stdCode, const char* period, WTSBarStruct* newBar, EngineType eType = ET_CTA);
+	void ctx_on_cond_triggered(uint32_t id, const char* stdCode, double target, double price, const char* usertag, EngineType eType = ET_CTA);
 
 	void hft_on_channel_ready(uint32_t cHandle, const char* trader);
 	void hft_on_channel_lost(uint32_t cHandle, const char* trader);
 	void hft_on_order(uint32_t cHandle, WtUInt32 localid, const char* stdCode, bool isBuy, double totalQty, double leftQty, double price, bool isCanceled, const char* userTag);
 	void hft_on_trade(uint32_t cHandle, WtUInt32 localid, const char* stdCode, bool isBuy, double vol, double price, const char* userTag);
 	void hft_on_entrust(uint32_t cHandle, WtUInt32 localid, const char* stdCode, bool bSuccess, const char* message, const char* userTag);
+	void hft_on_position(uint32_t cHandle, const char* stdCode, bool isLong, double prevol, double preavail, double newvol, double newavail);
 
 	void hft_on_order_queue(uint32_t id, const char* stdCode, WTSOrdQueData* newOrdQue);
 	void hft_on_order_detail(uint32_t id, const char* stdCode, WTSOrdDtlData* newOrdDtl);
@@ -152,7 +186,7 @@ public:
 private:
 	bool initTraders(WTSVariant* cfgTrader);
 	bool initParsers(WTSVariant* cfgParser);
-	bool initExecuters();
+	bool initExecuters(WTSVariant* cfgExecuter);
 	bool initDataMgr();
 	bool initEvtNotifier();
 	bool initCtaStrategies();
@@ -168,6 +202,7 @@ private:
 	FuncStraTickCallback	_cb_cta_tick;
 	FuncStraCalcCallback	_cb_cta_calc;
 	FuncStraBarCallback		_cb_cta_bar;
+	FuncStraCondTriggerCallback _cb_cta_cond_trigger;
 
 	FuncStraInitCallback	_cb_sel_init;
 	FuncSessionEvtCallback	_cb_sel_sessevt;
@@ -183,6 +218,7 @@ private:
 	FuncHftOrdCallback		_cb_hft_ord;
 	FuncHftTrdCallback		_cb_hft_trd;
 	FuncHftEntrustCallback	_cb_hft_entrust;
+	FuncHftPosCallback		_cb_hft_position;
 
 	FuncStraOrdQueCallback	_cb_hft_ordque;
 	FuncStraOrdDtlCallback	_cb_hft_orddtl;
@@ -208,7 +244,7 @@ private:
 
 	WtDataStorage*		_data_store;
 
-	WtDataManager		_data_mgr;
+	WtDtMgr				_data_mgr;
 
 	WTSBaseDataMgr		_bd_mgr;
 	WTSHotMgr			_hot_mgr;
@@ -221,5 +257,14 @@ private:
 
 	bool				_is_hft;
 	bool				_is_sel;
+
+	FuncLoadFnlBars		_ext_fnl_bar_loader;
+	FuncLoadRawBars		_ext_raw_bar_loader;
+	FuncLoadAdjFactors	_ext_adj_fct_loader;
+
+	void*			_feed_obj;
+	FuncReadBars	_feeder_bars;
+	FuncReadFactors	_feeder_fcts;
+	StdUniqueMutex	_feed_mtx;
 };
 

@@ -1,75 +1,19 @@
 #include <string>
 #include <map>
-//v6.3.15
-#include "./ThostTraderApi/ThostFtdcTraderApi.h"
+#include "../API/CTPMini1.5.8/ThostFtdcTraderApi.h"
 #include "TraderSpi.h"
 
 #include "../Share/IniHelper.hpp"
-#include "../Share/StrUtil.hpp"
+#include "../Share/ModuleHelper.hpp"
 #include "../Share/StdUtils.hpp"
 #include "../Share/DLLHelper.hpp"
 #include <boost/filesystem.hpp>
 
-std::string g_bin_dir;
+#include "../WTSUtils/WTSCfgLoader.h"
+#include "../Includes/WTSVariant.hpp"
+USING_NS_WTP;
 
-void inst_hlp() {}
-
-#ifdef _WIN32
-HMODULE	g_dllModule = NULL;
-
-BOOL APIENTRY DllMain(
-	HANDLE hModule,
-	DWORD  ul_reason_for_call,
-	LPVOID lpReserved
-)
-{
-	switch (ul_reason_for_call)
-	{
-	case DLL_PROCESS_ATTACH:
-		g_dllModule = (HMODULE)hModule;
-		break;
-	}
-	return TRUE;
-}
-
-#else
-#include <dlfcn.h>
-
-char PLATFORM_NAME[] = "UNIX";
-
-const std::string& getInstPath()
-{
-	static std::string moduleName;
-	if (moduleName.empty())
-	{
-		Dl_info dl_info;
-		dladdr((void *)inst_hlp, &dl_info);
-		moduleName = dl_info.dli_fname;
-		//printf("1:%s\n", moduleName.c_str());
-	}
-
-	return moduleName;
-}
-#endif
-
-const char* getBaseFolder()
-{
-	if (g_bin_dir.empty())
-	{
-#ifdef _WIN32
-		char strPath[MAX_PATH];
-		GetModuleFileName(g_dllModule, strPath, MAX_PATH);
-
-		g_bin_dir = StrUtil::standardisePath(strPath, false);
-#else
-		g_bin_dir = getInstPath();
-#endif
-		boost::filesystem::path p(g_bin_dir);
-		g_bin_dir = p.branch_path().string() + "/";
-	}
-
-	return g_bin_dir.c_str();
-}
+#include "../Share/charconv.hpp"
 
 // UserApi对象
 CThostFtdcTraderApi* pUserApi;
@@ -83,6 +27,7 @@ std::string SAVEPATH;	//保存位置
 std::string APPID;
 std::string AUTHCODE;
 uint32_t	CLASSMASK;	//期权
+bool		ONLYINCFG;	//只落地配置文件有的
 
 std::string COMM_FILE;		//输出的品种文件名
 std::string CONT_FILE;		//输出的合约文件名
@@ -99,7 +44,7 @@ CTPCreator		g_ctpCreator = NULL;
 // 请求编号
 int iRequestID = 0;
 
-#ifdef _WIN32
+#ifdef _MSC_VER
 #	define EXPORT_FLAG __declspec(dllexport)
 #else
 #	define EXPORT_FLAG __attribute__((__visibility__("default")))
@@ -109,38 +54,128 @@ int iRequestID = 0;
 extern "C"
 {
 #endif
-	EXPORT_FLAG int run(const char* cfgfile);
+	EXPORT_FLAG int run(const char* cfgfile, bool bAsync, bool isFile);
 #ifdef __cplusplus
 }
 #endif
 
-int run(const char* cfgfile)
+int run(const char* cfgfile, bool bAsync = false, bool isFile = true)
 {
-	std::string cfg = cfgfile;
-	IniHelper ini;
-	ini.load(cfg.c_str());
+	std::string map_files;
 
-	FRONT_ADDR = ini.readString("ctp", "front", "");
-	BROKER_ID	= ini.readString("ctp", "broker", "");
-	INVESTOR_ID = ini.readString("ctp", "user", "");
-	PASSWORD	= ini.readString("ctp", "pass", "");
-	APPID = ini.readString("ctp", "appid", "");
-	AUTHCODE = ini.readString("ctp", "authcode", "");
+	if (!isFile)
+	{
+		WTSVariant* root = WTSCfgLoader::load_from_content(cfgfile, true);
+		if (root == NULL)
+			return 0;
 
-	SAVEPATH	= ini.readString("config", "path", "");
-	CLASSMASK = ini.readUInt("config", "mask", 1|2|4); //1-期货,2-期权,4-股票
+		WTSVariant* ctp = root->get("ctp");
+		FRONT_ADDR = ctp->getCString("front");
+		BROKER_ID = ctp->getCString("broker");
+		INVESTOR_ID = ctp->getCString("user");
+		PASSWORD = ctp->getCString("pass");
+		APPID = ctp->getCString("appid");
+		AUTHCODE = ctp->getCString("authcode");
 
-	COMM_FILE = ini.readString("config", "commfile", "commodities.json");
-	CONT_FILE = ini.readString("config", "contfile", "contracts.json");
+		WTSVariant* cfg = root->get("config");
+		SAVEPATH = cfg->getCString("path");
+		CLASSMASK = cfg->getUInt32("mask"); //1-期货,2-期权,4-股票
+
+		COMM_FILE = cfg->getCString("commfile");
+		if (COMM_FILE.empty())
+			COMM_FILE = "commodities.json";
+
+		CONT_FILE = cfg->getCString("contfile");
+		if (CONT_FILE.empty())
+			CONT_FILE = "contracts.json";
+
+		map_files = cfg->getCString("mapfiles");
+		ONLYINCFG = ctp->getBoolean("onlyincfg");
+
+		MODULE_NAME = cfg->getCString("module");
+		if (MODULE_NAME.empty())
+		{
+#ifdef _WIN32
+			MODULE_NAME = "thosttraderapi.dll";
+#else
+			MODULE_NAME = "thosttraderapi.so";
+#endif
+		}
+
+		root->release();
+	}
+	else if (StrUtil::endsWith(cfgfile, ".ini"))
+	{
+		IniHelper ini;
+
+		ini.load(cfgfile);
+
+		FRONT_ADDR = ini.readString("ctp", "front", "");
+		BROKER_ID = ini.readString("ctp", "broker", "");
+		INVESTOR_ID = ini.readString("ctp", "user", "");
+		PASSWORD = ini.readString("ctp", "pass", "");
+		APPID = ini.readString("ctp", "appid", "");
+		AUTHCODE = ini.readString("ctp", "authcode", "");
+
+		SAVEPATH = ini.readString("config", "path", "");
+		CLASSMASK = ini.readUInt("config", "mask", 1 | 2 | 4); //1-期货,2-期权,4-股票
+		ONLYINCFG = wt_stricmp(ini.readString("config", "onlyincfg", "false").c_str(), "true") == 0;
+
+		COMM_FILE = ini.readString("config", "commfile", "commodities.json");
+		CONT_FILE = ini.readString("config", "contfile", "contracts.json");
+
+		map_files = ini.readString("config", "mapfiles", "");
 
 #ifdef _WIN32
-	MODULE_NAME = ini.readString("config", "module", "thosttraderapi.dll");
+		MODULE_NAME = ini.readString("config", "module", "thosttraderapi.dll");
 #else
-	MODULE_NAME = ini.readString("config", "module", "thosttraderapi.so");
+		MODULE_NAME = ini.readString("config", "module", "thosttraderapi.so");
 #endif
-	if(!boost::filesystem::exists(MODULE_NAME.c_str()))
+	}
+	else
 	{
-		MODULE_NAME = getBaseFolder();
+		WTSVariant* root = WTSCfgLoader::load_from_file(cfgfile);
+		if (root == NULL)
+			return 0;
+
+		WTSVariant* ctp = root->get("ctp");
+		FRONT_ADDR = ctp->getCString("front");
+		BROKER_ID = ctp->getCString("broker");
+		INVESTOR_ID = ctp->getCString("user");
+		PASSWORD = ctp->getCString("pass");
+		APPID = ctp->getCString("appid");
+		AUTHCODE = ctp->getCString("authcode");
+
+		WTSVariant* cfg = root->get("config");
+		SAVEPATH = cfg->getCString("path");
+		CLASSMASK = cfg->getUInt32("mask"); //1-期货,2-期权,4-股票
+
+		COMM_FILE = cfg->getCString("commfile");
+		if (COMM_FILE.empty())
+			COMM_FILE = "commodities.json";
+
+		CONT_FILE = cfg->getCString("contfile");
+		if (CONT_FILE.empty())
+			CONT_FILE = "contracts.json";
+
+		map_files = cfg->getCString("mapfiles");
+		ONLYINCFG = ctp->getBoolean("onlyincfg");
+
+		MODULE_NAME = cfg->getCString("module");
+		if (MODULE_NAME.empty())
+		{
+#ifdef _WIN32
+			MODULE_NAME = "thosttraderapi.dll";
+#else
+			MODULE_NAME = "thosttraderapi.so";
+#endif
+		}
+		root->release();
+	}
+
+	if(MODULE_NAME.empty() || !boost::filesystem::exists(MODULE_NAME.c_str()))
+	{
+		MODULE_NAME = getBinDir();
 #ifdef _WIN32
 		MODULE_NAME += "traders/thosttraderapi.dll";
 #else
@@ -154,13 +189,12 @@ int run(const char* cfgfile)
 	}
 
 	SAVEPATH = StrUtil::standardisePath(SAVEPATH);
-	std::string map_files = ini.readString("config", "mapfiles", "");
 	if (!map_files.empty())
 	{
 		StringVector ayFiles = StrUtil::split(map_files, ",");
 		for (const std::string& fName : ayFiles)
 		{
-			printf("开始读取映射文件%s...", fName.c_str());
+			printf("Reading mapping file %s...\r\n", fName.c_str());
 			IniHelper iniMap;
 			if (!StdFile::exists(fName.c_str()))
 				continue;
@@ -170,8 +204,17 @@ int run(const char* cfgfile)
 			int cout = iniMap.readSecKeyValArray("Name", ayKeys, ayVals);
 			for (int i = 0; i < cout; i++)
 			{
-				MAP_NAME[ayKeys[i]] = ayVals[i];
-				printf("品种名称映射: %s - %s\r\n", ayKeys[i].c_str(), ayVals[i].c_str());
+				std::string pName = ayVals[i];
+				bool isUTF8 = EncodingHelper::isUtf8((unsigned char*)pName.c_str(), pName.size());
+				if (!isUTF8)
+					pName = ChartoUTF8(ayVals[i]);
+				//保存的时候全部转成UTF8
+				MAP_NAME[ayKeys[i]] = pName;
+#ifdef _WIN32
+				printf("Commodity name mapping: %s - %s\r\n", ayKeys[i].c_str(), isUTF8 ? UTF8toChar(ayVals[i]).c_str() : ayVals[i].c_str());
+#else
+				printf("Commodity name mapping: %s - %s\r\n", ayKeys[i].c_str(), isUTF8 ? ayVals[i].c_str() : ChartoUTF8(ayVals[i]).c_str());
+#endif
 			}
 
 			ayKeys.clear();
@@ -180,13 +223,15 @@ int run(const char* cfgfile)
 			for (int i = 0; i < cout; i++)
 			{
 				MAP_SESSION[ayKeys[i]] = ayVals[i];
-				printf("交易时间映射: %s - %s\r\n", ayKeys[i].c_str(), ayVals[i].c_str());
+				printf("Trading session mapping: %s - %s\r\n", ayKeys[i].c_str(), ayVals[i].c_str());
 			}
 		}
 	}
 
 	// 初始化UserApi
 	DllHandle dllInst = DLLHelper::load_library(MODULE_NAME.c_str());
+	if (dllInst == NULL)
+		printf("Loading module %s failed\r\n", MODULE_NAME.c_str());
 #ifdef _WIN32
 #	ifdef _WIN64
 	const char* creatorName = "?CreateFtdcTraderApi@CThostFtdcTraderApi@@SAPEAV1@PEBD@Z";
@@ -197,6 +242,8 @@ int run(const char* cfgfile)
 	const char* creatorName = "_ZN19CThostFtdcTraderApi19CreateFtdcTraderApiEPKc";
 #endif
 	g_ctpCreator = (CTPCreator)DLLHelper::get_symbol(dllInst, creatorName);
+	if(g_ctpCreator == NULL)
+		printf("Loading CreateFtdcTraderApi failed\r\n");
 	pUserApi = g_ctpCreator("");			// 创建UserApi
 	CTraderSpi* pUserSpi = new CTraderSpi();
 	pUserApi->RegisterSpi((CThostFtdcTraderSpi*)pUserSpi);			// 注册事件类
@@ -205,6 +252,9 @@ int run(const char* cfgfile)
 	pUserApi->RegisterFront((char*)FRONT_ADDR.c_str());				// connect
 	pUserApi->Init();
 
-	pUserApi->Join();
+    //如果不是异步，则等待API返回
+    if(!bAsync)
+        pUserApi->Join();
+
 	return 0;
 }

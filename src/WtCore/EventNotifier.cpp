@@ -8,44 +8,33 @@
  * \brief 
  */
 #include "EventNotifier.h"
+#include "WtHelper.h"
 
-#include "../Share/StrUtil.hpp"
+#include "../Share/TimeUtils.hpp"
+#include "../Share/DLLHelper.hpp"
+
 #include "../Includes/WTSTradeDef.hpp"
 #include "../Includes/WTSCollection.hpp"
-#include "../Includes/WTSContractInfo.hpp"
 #include "../Includes/WTSVariant.hpp"
 
-#include "../WTSTools/WTSBaseDataMgr.h"
 #include "../WTSTools/WTSLogger.h"
 
 #include <rapidjson/document.h>
 #include <rapidjson/prettywriter.h>
+#include <rapidjson/writer.h>
 namespace rj = rapidjson;
 
-USING_NS_OTP;
+USING_NS_WTP;
 
-#pragma warning(disable:4200)
-
-
-#define UDP_MSG_PUSHTRADE	0x300
-#define UDP_MSG_PUSHORDER	0x301
-#define UDP_MSG_PUSHEVENT	0x302
-
-#pragma pack(push,1)
-//UDP请求包
-typedef struct _UDPPacket
+void on_mq_log(unsigned long id, const char* message, bool bServer)
 {
-	char			_group[16];
-	char			_trader[16];
-	uint32_t		_type;
-	uint32_t		_length;
-	char			_data[0];
-} UDPPacket;
-#pragma pack(pop)
+
+}
 
 EventNotifier::EventNotifier()
-	: m_bTerminated(false)
-	, m_bReady(false)
+	: _mq_sid(0)
+	, _publisher(NULL)
+	, _stopped(false)
 {
 	
 }
@@ -53,6 +42,14 @@ EventNotifier::EventNotifier()
 
 EventNotifier::~EventNotifier()
 {
+	_stopped = true;
+	if (_worker)
+		_worker->join();
+
+	_asyncio.stop();
+
+	if (_remover && _mq_sid != 0)
+		_remover(_mq_sid);
 }
 
 bool EventNotifier::init(WTSVariant* cfg)
@@ -60,137 +57,176 @@ bool EventNotifier::init(WTSVariant* cfg)
 	if (!cfg->getBoolean("active"))
 		return false;
 
-	m_strGroupTag = cfg->getCString("tag");
+	_url = cfg->getCString("url");
+	std::string module = DLLHelper::wrap_module("WtMsgQue", "lib");
+	//先看工作目录下是否有对应模块
+	std::string dllpath = WtHelper::getCWD() + module;
+	//如果没有,则再看模块目录,即dll同目录下
+	if (!StdFile::exists(dllpath.c_str()))
+		dllpath = WtHelper::getInstDir() + module;
 
-	WTSVariant* cfgBC = cfg->get("broadcast");
-	if (cfgBC)
+	DllHandle dllInst = DLLHelper::load_library(dllpath.c_str());
+	if (dllInst == NULL)
 	{
-		for (uint32_t idx = 0; idx < cfgBC->size(); idx++)
-		{
-			WTSVariant* cfgItem = cfgBC->get(idx);
-			addBRecver(cfgItem->getCString("host"), cfgItem->getInt32("port"));
-		}
+		WTSLogger::error("MQ module {} loading failed", dllpath.c_str());
+		return false;
 	}
 
-	WTSVariant* cfgMC = cfg->get("multicast");
-	if (cfgMC)
+	_creator = (FuncCreateMQServer)DLLHelper::get_symbol(dllInst, "create_server");
+	if (_creator == NULL)
 	{
-		for (uint32_t idx = 0; idx < cfgMC->size(); idx++)
-		{
-			WTSVariant* cfgItem = cfgMC->get(idx);
-			addMRecver(cfgItem->getCString("host"), cfgItem->getInt32("port"), cfgItem->getInt32("sendport"));
-		}
+		DLLHelper::free_library(dllInst);
+		WTSLogger::error("MQ module {} is not compatible", dllpath.c_str());
+		return false;
 	}
 
-	start();
+	_remover = (FuncDestroyMQServer)DLLHelper::get_symbol(dllInst, "destroy_server");
+	_publisher = (FundPublishMessage)DLLHelper::get_symbol(dllInst, "publish_message");
+	_register = (FuncRegCallbacks)DLLHelper::get_symbol(dllInst, "regiter_callbacks");
 
-	m_bReady = true;
+	//注册回调函数
+	_register(on_mq_log);
+	
+	//创建一个MQServer
+	_mq_sid = _creator(_url.c_str());
+
+	WTSLogger::info("EventNotifier initialized with channel {}", _url.c_str());
+
+	if (_worker == NULL)
+	{
+		boost::asio::io_service::work work(_asyncio);
+		_worker.reset(new StdThread([this]() {
+			while (!_stopped)
+			{
+				std::this_thread::sleep_for(std::chrono::milliseconds(2));
+				_asyncio.run_one();
+				//m_asyncIO.run();
+			}
+		}));
+	}
 
 	return true;
 }
 
-void EventNotifier::start()
+void EventNotifier::notify_log(const char* tag, const char* message)
 {
-	if (!m_listRawRecver.empty())
-	{
-		m_sktBroadcast.reset(new UDPSocket(m_ioservice, boost::asio::ip::udp::endpoint(boost::asio::ip::udp::v4(), 0)));
-	}
-
-	m_thrdIO.reset(new StdThread([this](){
-		try
-		{
-			m_ioservice.run();
-		}
-		catch(...)
-		{
-			m_ioservice.stop();
-		}
-	}));
-
-	WTSLogger::info("Event notifier started");
-}
-
-void EventNotifier::stop()
-{
-	if (!m_bReady)
+	if (_mq_sid == 0)
 		return;
 
-	m_bTerminated = true;
-	m_ioservice.stop();
-	if (m_thrdIO)
-		m_thrdIO->join();
+	std::string strTag = tag;
+	std::string strMsg = message;
+	_asyncio.post([this, strTag, strMsg]() {
+		std::string data;
+		{
+			rj::Document root(rj::kObjectType);
+			rj::Document::AllocatorType &allocator = root.GetAllocator();
 
-	m_condCast.notify_all();
-	if (m_thrdCast)
-		m_thrdCast->join();
+			root.AddMember("tag", rj::Value(strTag.c_str(), allocator), allocator);
+			root.AddMember("time", TimeUtils::getLocalTimeNow(), allocator);
+			root.AddMember("message", rj::Value(strMsg.c_str(), allocator), allocator);
+
+			rj::StringBuffer sb;
+			rj::PrettyWriter<rj::StringBuffer> writer(sb);
+			root.Accept(writer);
+
+			data = sb.GetString();
+		}
+
+		if (_publisher)
+			_publisher(_mq_sid, "LOG", data.c_str(), (unsigned long)data.size());
+	});
 }
 
-bool EventNotifier::addBRecver(const char* remote, int port)
+void EventNotifier::notify_event(const char* message)
 {
-	try
-	{
-		boost::asio::ip::address_v4 addr = boost::asio::ip::address_v4::from_string(remote);
-		m_listRawRecver.emplace_back(EndPoint(addr, port));
+	if (_mq_sid == 0)
+		return;
 
-		WTSLogger::info("Receiver %s:%d added", remote, port);
-	}
-	catch(...)
-	{
-		return false;
-	}
+	std::string strMsg = message;
+	_asyncio.post([this, strMsg]() {
+		std::string data;
+		{
+			rj::Document root(rj::kObjectType);
+			rj::Document::AllocatorType &allocator = root.GetAllocator();
 
-	return true;
+			root.AddMember("time", TimeUtils::getLocalTimeNow(), allocator);
+			root.AddMember("message", rj::Value(strMsg.c_str(), allocator), allocator);
+
+			rj::StringBuffer sb;
+			rj::PrettyWriter<rj::StringBuffer> writer(sb);
+			root.Accept(writer);
+
+			data = sb.GetString();
+		}
+		if (_publisher)
+			_publisher(_mq_sid, "GRP_EVENT", data.c_str(), (unsigned long)data.size());
+	});
 }
 
-
-bool EventNotifier::addMRecver(const char* remote, int port, int sendport)
+void EventNotifier::notify(const char* trader, const char* message)
 {
-	try
-	{
-		boost::asio::ip::address_v4 addr = boost::asio::ip::address_v4::from_string(remote);
-		auto ep = EndPoint(addr, port);
-		UDPSocketPtr sock(new UDPSocket(m_ioservice, boost::asio::ip::udp::endpoint(boost::asio::ip::udp::v4(), sendport)));
-		boost::asio::ip::multicast::join_group option(ep.address());
-		sock->set_option(option);
-		m_listRawGroup.emplace_back(std::make_pair(sock, ep));
-	}
-	catch(...)
-	{
-		return false;
-	}
+	if (_mq_sid == 0)
+		return;
 
-	return true;
+	std::string strTrader = trader;
+	std::string strMsg = message;
+	_asyncio.post([this, strTrader, strMsg]() {
+		std::string data;
+		{
+			rj::Document root(rj::kObjectType);
+			rj::Document::AllocatorType &allocator = root.GetAllocator();
+
+			root.AddMember("trader", rj::Value(strTrader.c_str(), allocator), allocator);
+			root.AddMember("time", TimeUtils::getLocalTimeNow(), allocator);
+			root.AddMember("message", rj::Value(strMsg.c_str(), allocator), allocator);
+
+			rj::StringBuffer sb;
+			rj::PrettyWriter<rj::StringBuffer> writer(sb);
+			root.Accept(writer);
+
+			data = sb.GetString();
+		}
+		if (_publisher)
+			_publisher(_mq_sid, "TRD_NOTIFY", data.c_str(), (unsigned long)data.size());
+	});
 }
 
 void EventNotifier::notify(const char* trader, uint32_t localid, const char* stdCode, WTSTradeInfo* trdInfo)
 {
-	if (trdInfo == NULL || !m_bReady)
+	if (trdInfo == NULL || _mq_sid == 0)
 		return;
 
-	std::string data;
-	tradeToJson(localid, stdCode, trdInfo, data);
-	notify(trader, data, UDP_MSG_PUSHTRADE);
+	std::string strTrader = trader;
+	std::string strCode = stdCode;
+	trdInfo->retain();
+	_asyncio.post([this, strTrader, strCode, localid, trdInfo]() {
+		std::string data;
+		tradeToJson(strTrader.c_str(), localid, strCode.c_str(), trdInfo, data);
+		if (_publisher)
+			_publisher(_mq_sid, "TRD_TRADE", data.c_str(), (unsigned long)data.size());
+		trdInfo->release();
+	});
 }
 
 void EventNotifier::notify(const char* trader, uint32_t localid, const char* stdCode, WTSOrderInfo* ordInfo)
 {
-	if (ordInfo == NULL || !m_bReady)
+	if (ordInfo == NULL || _mq_sid == 0)
 		return;
 
-	std::string data;
-	orderToJson(localid, stdCode, ordInfo, data);
-	notify(trader, data, UDP_MSG_PUSHORDER);
+	std::string strTrader = trader;
+	std::string strCode = stdCode;
+	ordInfo->retain();
+	_asyncio.post([this, strTrader, strCode, localid, ordInfo]() {
+		std::string data;
+		orderToJson(strTrader.c_str(), localid, strCode.c_str(), ordInfo, data);
+		if (_publisher)
+			_publisher(_mq_sid, "TRD_ORDER", data.c_str(), (unsigned long)data.size());
+	});
+
+	
 }
 
-void EventNotifier::notify(const char* trader, const std::string& message)
-{
-	if (message.empty() || !m_bReady)
-		return;
-
-	notify(trader, message, UDP_MSG_PUSHEVENT);
-}
-
-void EventNotifier::tradeToJson(uint32_t localid, const char* stdCode, WTSTradeInfo* trdInfo, std::string& output)
+void EventNotifier::tradeToJson(const char* trader, uint32_t localid, const char* stdCode, WTSTradeInfo* trdInfo, std::string& output)
 {
 	if(trdInfo == NULL)
 	{
@@ -206,6 +242,8 @@ void EventNotifier::tradeToJson(uint32_t localid, const char* stdCode, WTSTradeI
 		rj::Document root(rj::kObjectType);
 		rj::Document::AllocatorType &allocator = root.GetAllocator();
 
+		root.AddMember("trader", rj::Value(trader, allocator), allocator);
+		root.AddMember("time", TimeUtils::getLocalTimeNow(), allocator);
 		root.AddMember("localid", localid, allocator);
 		root.AddMember("code", rj::Value(stdCode, allocator), allocator);
 		root.AddMember("islong", isLong, allocator);
@@ -223,7 +261,7 @@ void EventNotifier::tradeToJson(uint32_t localid, const char* stdCode, WTSTradeI
 	}
 }
 
-void EventNotifier::orderToJson(uint32_t localid, const char* stdCode, WTSOrderInfo* ordInfo, std::string& output)
+void EventNotifier::orderToJson(const char* trader, uint32_t localid, const char* stdCode, WTSOrderInfo* ordInfo, std::string& output)
 {
 	if (ordInfo == NULL)
 	{
@@ -240,6 +278,8 @@ void EventNotifier::orderToJson(uint32_t localid, const char* stdCode, WTSOrderI
 		rj::Document root(rj::kObjectType);
 		rj::Document::AllocatorType &allocator = root.GetAllocator();
 
+		root.AddMember("trader", rj::Value(trader, allocator), allocator);
+		root.AddMember("time", TimeUtils::getLocalTimeNow(), allocator);
 		root.AddMember("localid", localid, allocator);
 		root.AddMember("code", rj::Value(stdCode, allocator), allocator);
 		root.AddMember("islong", isLong, allocator);
@@ -261,94 +301,97 @@ void EventNotifier::orderToJson(uint32_t localid, const char* stdCode, WTSOrderI
 	}
 }
 
-void EventNotifier::notify(const char* trader, const std::string& data, uint32_t dataType)
+void EventNotifier::notify_chart_index(uint64_t time, const char* straId, const char* idxName, const char* lineName, double val)
 {
-	if(m_sktBroadcast == NULL || data.empty() || m_bTerminated)
+	if (_mq_sid == 0)
 		return;
 
-	{
-		StdUniqueLock lock(m_mtxCast);
-		m_dataQue.push(NotifyData(trader, data, dataType));
-	}
+	std::string sid = straId;
+	std::string iname = idxName;
+	std::string lname = lineName;
+	_asyncio.post([this, time, sid, iname, lname, val]() {
+		std::string data;
+		{
+			rj::Document root(rj::kObjectType);
+			rj::Document::AllocatorType &allocator = root.GetAllocator();
 
-	if(m_thrdCast == NULL)
-	{
-		m_thrdCast.reset(new StdThread([this](){
+			root.AddMember("strategy", rj::Value(sid.c_str(), allocator), allocator);
+			root.AddMember("index_name", rj::Value(iname.c_str(), allocator), allocator);
+			root.AddMember("line_name", rj::Value(lname.c_str(), allocator), allocator);
+			root.AddMember("time", time, allocator);
+			root.AddMember("value", val, allocator);
 
-			while (!m_bTerminated)
-			{
-				if(m_dataQue.empty())
-				{
-					StdUniqueLock lock(m_mtxCast);
-					m_condCast.wait(lock);
-					continue;
-				}	
+			rj::StringBuffer sb;
+			rj::PrettyWriter<rj::StringBuffer> writer(sb);
+			root.Accept(writer);
 
-				std::queue<NotifyData> tmpQue;
-				{
-					StdUniqueLock lock(m_mtxCast);
-					tmpQue.swap(m_dataQue);
-				}
-				
-				while(!tmpQue.empty())
-				{
-					const NotifyData& castData = tmpQue.front();
-
-					if (castData._data.empty())
-						break;
-
-					//直接广播
-					if (!m_listRawGroup.empty() || !m_listRawRecver.empty())
-					{
-						std::string buf_raw;
-						buf_raw.resize(sizeof(UDPPacket) + castData._data.size());
-						UDPPacket* pack = (UDPPacket*)buf_raw.data();
-						pack->_length = castData._data.size();
-						pack->_type = castData._datatype;
-						strcpy(pack->_group, m_strGroupTag.c_str());
-						strcpy(pack->_trader, castData._trader.c_str());
-						memcpy(&pack->_data, castData._data.data(), castData._data.size());
-
-						//广播
-						for (auto it = m_listRawRecver.begin(); it != m_listRawRecver.end(); it++)
-						{
-							const EndPoint& receiver = (*it);
-							m_sktBroadcast->send_to(boost::asio::buffer(buf_raw), receiver);
-						}
-
-						//组播
-						for (auto it = m_listRawGroup.begin(); it != m_listRawGroup.end(); it++)
-						{
-							const MulticastPair& item = *it;
-							it->first->send_to(boost::asio::buffer(buf_raw), item.second);
-						}
-					}
-
-					tmpQue.pop();
-				} 
-			}
-		}));
-	}
-	else
-	{
-		m_condCast.notify_all();
-	}
+			data = sb.GetString();
+		}
+		if (_publisher)
+			_publisher(_mq_sid, "CHART_INDEX", data.c_str(), (unsigned long)data.size());
+	});
 }
 
-void EventNotifier::handle_send_broad(const EndPoint& ep, const boost::system::error_code& error, std::size_t bytes_transferred)
+void EventNotifier::notify_chart_marker(uint64_t time, const char* straId, double price, const char* icon, const char* tag)
 {
-	if(error)
-	{
-		WTSLogger::error("Broadcasting of event failed, remote addr: %s, error message: %s", ep.address().to_string().c_str(), error.message().c_str());
-	}
+	if (_mq_sid == 0)
+		return;
+
+	std::string sid = straId;
+	std::string sIcon = icon;
+	std::string sTag = tag;
+	_asyncio.post([this, time, sid, sIcon, sTag, price]() {
+		std::string data;
+		{
+			rj::Document root(rj::kObjectType);
+			rj::Document::AllocatorType &allocator = root.GetAllocator();
+
+			root.AddMember("strategy", rj::Value(sid.c_str(), allocator), allocator);
+			root.AddMember("icon", rj::Value(sIcon.c_str(), allocator), allocator);
+			root.AddMember("tag", rj::Value(sTag.c_str(), allocator), allocator);
+			root.AddMember("time", time, allocator);
+			root.AddMember("price", price, allocator);
+
+			rj::StringBuffer sb;
+			rj::Writer<rj::StringBuffer> writer(sb);
+			root.Accept(writer);
+
+			data = sb.GetString();
+		}
+		if (_publisher)
+			_publisher(_mq_sid, "CHART_MARKER", data.c_str(), (unsigned long)data.size());
+	});
 }
 
-void EventNotifier::handle_send_multi(const EndPoint& ep, const boost::system::error_code& error, std::size_t bytes_transferred)
+void EventNotifier::notify_trade(const char* straId, const char* stdCode, bool isLong, bool isOpen, uint64_t curTime, double price, const char* userTag)
 {
-	if(error)
-	{
-		WTSLogger::error("Multicasting of event failed, remote addr: %s, error message: %s", ep.address().to_string().c_str(), error.message().c_str());
-	}
-}
+	if (_mq_sid == 0)
+		return;
 
-;
+	std::string sid = straId;
+	std::string code = stdCode;
+	std::string tag = userTag;
+	_asyncio.post([this, sid, code, tag, isLong, isOpen, curTime, price]() {
+		std::string data;
+		{
+			rj::Document root(rj::kObjectType);
+			rj::Document::AllocatorType &allocator = root.GetAllocator();
+
+			root.AddMember("strategy", rj::Value(sid.c_str(), allocator), allocator);
+			root.AddMember("code", rj::Value(code.c_str(), allocator), allocator);
+			root.AddMember("tag", rj::Value(tag.c_str(), allocator), allocator);
+			root.AddMember("long", isLong, allocator);
+			root.AddMember("open", isOpen, allocator);
+			root.AddMember("time", curTime, allocator);
+			root.AddMember("price", price, allocator);
+
+			rj::StringBuffer sb;
+			rj::Writer<rj::StringBuffer> writer(sb);
+			root.Accept(writer);
+
+			data = sb.GetString();
+		}
+		if (_publisher)
+			_publisher(_mq_sid, "STRA_TRADE", data.c_str(), (unsigned long)data.size());
+	});
+}

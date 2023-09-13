@@ -11,11 +11,11 @@
 #include "../Includes/WTSCollection.hpp"
 
 
-NS_OTP_BEGIN
+NS_WTP_BEGIN
 	class WTSTickData;
-NS_OTP_END
+NS_WTP_END
 
-USING_NS_OTP;
+USING_NS_WTP;
 
 /*
  *	·ÂÕæ½»Ò×Æ÷
@@ -69,7 +69,7 @@ private:
 	OrderCache*			_awaits;
 	StdUniqueMutex	_mtx_awaits;
 
-	faster_hashset<std::string>	_codes;
+	wt_hashset<std::string>	_codes;
 
 	uint64_t		_max_tick_time;
 	uint64_t		_last_match_time;
@@ -94,7 +94,7 @@ private:
 		}
 	} PosItem;
 
-	faster_hashmap<std::string, PosItem> _positions;
+	wt_hashmap<std::string, PosItem> _positions;
 	std::string		_pos_file;
 
 private:
@@ -116,7 +116,7 @@ private:
 //////////////////////////////////////////////////////////////////////////
 //ITraderApi
 public:
-	virtual bool init(WTSParams *params) override;
+	virtual bool init(WTSVariant *params) override;
 
 	virtual void release() override;
 

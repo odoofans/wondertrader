@@ -4,8 +4,8 @@
 extern WtBtRunner& getRunner();
 
 
-ExpSelMocker::ExpSelMocker(HisDataReplayer* replayer, const char* name, int32_t slippage /* = 0 */)
-	: SelMocker(replayer, name, slippage)
+ExpSelMocker::ExpSelMocker(HisDataReplayer* replayer, const char* name, int32_t slippage /* = 0 */, bool isRatioSlp/* = false*/)
+	: SelMocker(replayer, name, slippage, isRatioSlp)
 {
 }
 
@@ -42,7 +42,9 @@ void ExpSelMocker::on_session_end(uint32_t uDate)
 
 void ExpSelMocker::on_tick_updated(const char* stdCode, WTSTickData* newTick)
 {
-	SelMocker::on_tick_updated(stdCode, newTick);
+	auto it = _tick_subs.find(stdCode);
+	if (it == _tick_subs.end())
+		return;
 
 	//向外部回调
 	getRunner().ctx_on_tick(_context_id, stdCode, newTick, ET_SEL);
@@ -63,4 +65,9 @@ void ExpSelMocker::on_strategy_schedule(uint32_t curDate, uint32_t curTime)
 	getRunner().ctx_on_calc(_context_id, curDate, curTime, ET_SEL);
 
 	getRunner().on_schedule_event(curDate, curTime);
+}
+
+void ExpSelMocker::on_bactest_end()
+{
+	getRunner().on_backtest_end();
 }

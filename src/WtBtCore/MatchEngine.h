@@ -9,12 +9,12 @@
 #include "../Includes/WTSCollection.hpp"
 #include "../Includes/FasterDefs.h"
 
-NS_OTP_BEGIN
+NS_WTP_BEGIN
 class WTSTickData;
 class WTSVariant;
-NS_OTP_END
+NS_WTP_END
 
-USING_NS_OTP;
+USING_NS_WTP;
 
 typedef std::vector<uint32_t> OrderIDs;
 
@@ -91,7 +91,7 @@ private:
 		double		_price;
 		uint32_t	_state;
 		uint64_t	_time;
-		uint32_t	_queue;
+		double		_queue;
 		bool		_positive;
 
 		_OrderInfo()
@@ -100,10 +100,10 @@ private:
 		}
 	} OrderInfo;
 
-	typedef faster_hashmap<uint32_t, OrderInfo> Orders;
+	typedef wt_hashmap<uint32_t, OrderInfo> Orders;
 	Orders	_orders;
 
-	typedef std::map<uint32_t, uint32_t>	LOBItems;
+	typedef std::map<uint32_t, double>	LOBItems;
 
 	typedef struct _LmtOrdBook
 	{
@@ -127,7 +127,7 @@ private:
 			_bid_px = 0;
 		}
 	} LmtOrdBook;
-	typedef faster_hashmap<std::string, LmtOrdBook> LmtOrdBooks;
+	typedef wt_hashmap<std::string, LmtOrdBook> LmtOrdBooks;
 	LmtOrdBooks	_lmt_ord_books;
 
 	IMatchSink*	_sink;

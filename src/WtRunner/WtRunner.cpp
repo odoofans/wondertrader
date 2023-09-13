@@ -12,22 +12,13 @@
 #include "../WtCore/WtHelper.h"
 #include "../WtCore/CtaStraContext.h"
 #include "../WtCore/HftStraContext.h"
+#include "../WtCore/WtDiffExecuter.h"
 
 #include "../Includes/WTSVariant.hpp"
 #include "../WTSTools/WTSLogger.h"
-#include "../Share/StdUtils.hpp"
-#include "../Share/StrUtil.hpp"
-#include "../Share/JsonToVariant.hpp"
-
+#include "../WTSUtils/WTSCfgLoader.h"
 #include "../WTSUtils/SignalHook.hpp"
-
-#include <boost/circular_buffer.hpp>
-
-#ifdef _WIN32
-#define my_stricmp _stricmp
-#else
-#define my_stricmp strcasecmp
-#endif
+#include "../Share/StrUtil.hpp"
 
 
 const char* getBinDir()
@@ -50,9 +41,14 @@ WtRunner::WtRunner()
 	, _is_hft(false)
 	, _is_sel(false)
 {
+#if _WIN32
+#pragma message("Signal hooks disabled in WIN32")
+#else
+#pragma message("Signal hooks enabled in UNIX")
 	install_signal_hooks([](const char* message) {
 		WTSLogger::error(message);
 	});
+#endif
 }
 
 
@@ -62,7 +58,9 @@ WtRunner::~WtRunner()
 
 bool WtRunner::init()
 {
-	std::string path = WtHelper::getCWD() + "logcfg.json";
+	std::string path = "logcfg.json";
+	if(!StdFile::exists(path.c_str()))
+		path = "logcfg.yaml";
 	WTSLogger::init(path.c_str());
 
 	WtHelper::setInstDir(getBinDir());
@@ -70,33 +68,55 @@ bool WtRunner::init()
 	return true;
 }
 
-bool WtRunner::config(const char* cfgFile)
+bool WtRunner::config()
 {
-	std::string json;
-	BoostFile::read_file_contents(cfgFile, json);
-	rj::Document document;
-	document.Parse(json.c_str());
+	std::string cfgFile = "config.json";
+	if (!StdFile::exists(cfgFile.c_str()))
+		cfgFile = "config.yaml";
 
-	if(document.HasParseError())
+	_config = WTSCfgLoader::load_from_file(cfgFile);
+	if(_config == NULL)
 	{
-		auto ec = document.GetParseError();
-		WTSLogger::error("Configuration file parsing failed");
+		WTSLogger::error("Loading config file {} failed", cfgFile);
 		return false;
 	}
-
-	_config = WTSVariant::createObject();
-	jsonToVariant(document, _config);
 
 	//基础数据文件
 	WTSVariant* cfgBF = _config->get("basefiles");
 	if (cfgBF->get("session"))
 		_bd_mgr.loadSessions(cfgBF->getCString("session"));
 
-	if (cfgBF->get("commodity"))
-		_bd_mgr.loadCommodities(cfgBF->getCString("commodity"));
+	WTSVariant* cfgItem = cfgBF->get("commodity");
+	if (cfgItem)
+	{
+		if (cfgItem->type() == WTSVariant::VT_String)
+		{
+			_bd_mgr.loadCommodities(cfgItem->asCString());
+		}
+		else if (cfgItem->type() == WTSVariant::VT_Array)
+		{
+			for (uint32_t i = 0; i < cfgItem->size(); i++)
+			{
+				_bd_mgr.loadCommodities(cfgItem->get(i)->asCString());
+			}
+		}
+	}
 
-	if (cfgBF->get("contract"))
-		_bd_mgr.loadContracts(cfgBF->getCString("contract"));
+	cfgItem = cfgBF->get("contract");
+	if (cfgItem)
+	{
+		if (cfgItem->type() == WTSVariant::VT_String)
+		{
+			_bd_mgr.loadContracts(cfgItem->asCString());
+		}
+		else if (cfgItem->type() == WTSVariant::VT_Array)
+		{
+			for (uint32_t i = 0; i < cfgItem->size(); i++)
+			{
+				_bd_mgr.loadContracts(cfgItem->get(i)->asCString());
+			}
+		}
+	}
 
 	if (cfgBF->get("holiday"))
 		_bd_mgr.loadHolidays(cfgBF->getCString("holiday"));
@@ -106,6 +126,17 @@ bool WtRunner::config(const char* cfgFile)
 
 	if (cfgBF->get("second"))
 		_hot_mgr.loadSeconds(cfgBF->getCString("second"));
+
+	if (cfgBF->has("rules"))
+	{
+		auto cfgRules = cfgBF->get("rules");
+		auto tags = cfgRules->memberNames();
+		for (const std::string& ruleTag : tags)
+		{
+			_hot_mgr.loadCustomRules(ruleTag.c_str(), cfgRules->getCString(ruleTag.c_str()));
+			WTSLogger::info("{} rules loaded from {}", ruleTag, cfgRules->getCString(ruleTag.c_str()));
+		}
+	}
 
 	//初始化运行环境
 	initEngine();
@@ -117,14 +148,117 @@ bool WtRunner::config(const char* cfgFile)
 		return false;
 
 	//初始化行情通道
-	initParsers();
+	WTSVariant* cfgParser = _config->get("parsers");
+	if (cfgParser)
+	{
+		if (cfgParser->type() == WTSVariant::VT_String)
+		{
+			const char* filename = cfgParser->asCString();
+			if (StdFile::exists(filename))
+			{
+				WTSLogger::info("Reading parser config from {}...", filename);
+				WTSVariant* var = WTSCfgLoader::load_from_file(filename);
+				if(var)
+				{
+					if (!initParsers(var->get("parsers")))
+						WTSLogger::error("Loading parsers failed");
+					var->release();
+				}
+				else
+				{
+					WTSLogger::error("Loading parser config {} failed", filename);
+				}
+			}
+			else
+			{
+				WTSLogger::error("Parser configuration {} not exists", filename);
+			}
+		}
+		else if (cfgParser->type() == WTSVariant::VT_Array)
+		{
+			initParsers(cfgParser);
+		}
+	}
 
 	//初始化交易通道
-	initTraders();
+	WTSVariant* cfgTraders = _config->get("traders");
+	if (cfgTraders)
+	{
+		if (cfgTraders->type() == WTSVariant::VT_String)
+		{
+			const char* filename = cfgTraders->asCString();
+			if (StdFile::exists(filename))
+			{
+				WTSLogger::info("Reading trader config from {}...", filename);
+				WTSVariant* var = WTSCfgLoader::load_from_file(filename);
+				if (var)
+				{
+					if (!initTraders(var->get("traders")))
+						WTSLogger::error("Loading traders failed");
+					var->release();
+				}
+				else
+				{
+					WTSLogger::error("Loading trader config {} failed", filename);
+				}
+			}
+			else
+			{
+				WTSLogger::error("Trader configuration {} not exists", filename);
+			}
+		}
+		else if (cfgTraders->type() == WTSVariant::VT_Array)
+		{
+			initTraders(cfgTraders);
+		}
+	}
+
+	initEvtNotifier();
 
 	//如果不是高频引擎,则需要配置执行模块
 	if (!_is_hft)
-		initExecuters();
+	{
+		WTSVariant* cfgExec = _config->get("executers");
+		if (cfgExec != NULL)
+		{
+			if (cfgExec->type() == WTSVariant::VT_String)
+			{
+				const char* filename = cfgExec->asCString();
+				if (StdFile::exists(filename))
+				{
+					WTSLogger::info("Reading executer config from {}...", filename);
+					WTSVariant* var = WTSCfgLoader::load_from_file(filename);
+					if (var)
+					{
+						if (!initExecuters(var->get("executers")))
+							WTSLogger::error("Loading executers failed");
+
+						WTSVariant* c = var->get("routers");
+						if (c != NULL)
+							_cta_engine.loadRouterRules(c);
+
+						var->release();
+					}
+					else
+					{
+						WTSLogger::error("Loading executer config {} failed", filename);
+					}
+				}
+				else
+				{
+					WTSLogger::error("Trader configuration {} not exists", filename);
+				}
+			}
+			else if (cfgExec->type() == WTSVariant::VT_Array)
+			{
+				initExecuters(cfgExec);
+			}
+		}
+
+		WTSVariant* cfgRouter = _config->get("routers");
+		if (cfgRouter != NULL)
+			_cta_engine.loadRouterRules(cfgRouter);
+	}
 
 	if (!_is_hft)
 		initCtaStrategies();
@@ -155,9 +289,10 @@ bool WtRunner::initCtaStrategies()
 
 		const char* id = cfgItem->getCString("id");
 		const char* name = cfgItem->getCString("name");
+		int32_t slippage = cfgItem->getInt32("slippage");
 		CtaStrategyPtr stra = _cta_stra_mgr.createStrategy(name, id);
 		stra->self()->init(cfgItem->get("params"));
-		CtaStraContext* ctx = new CtaStraContext(&_cta_engine, id);
+		CtaStraContext* ctx = new CtaStraContext(&_cta_engine, id, slippage);
 		ctx->set_strategy(stra->self());
 		_cta_engine.addContext(CtaContextPtr(ctx));
 	}
@@ -181,15 +316,19 @@ bool WtRunner::initHftStrategies()
 	for (uint32_t idx = 0; idx < cfg->size(); idx++)
 	{
 		WTSVariant* cfgItem = cfg->get(idx);
+		if (!cfgItem->getBoolean("active"))
+			continue;
+
 		const char* id = cfgItem->getCString("id");
 		const char* name = cfgItem->getCString("name");
 		bool agent = cfgItem->getBoolean("agent");
+		int32_t slippage = cfgItem->getInt32("slippage");
 		HftStrategyPtr stra = _hft_stra_mgr.createStrategy(name, id);
 		if (stra == NULL)
 			continue;
 
 		stra->self()->init(cfgItem->get("params"));
-		HftStraContext* ctx = new HftStraContext(&_hft_engine, id, agent);
+		HftStraContext* ctx = new HftStraContext(&_hft_engine, id, agent,slippage);
 		ctx->set_strategy(stra->self());
 
 		const char* traderid = cfgItem->getCString("trader");
@@ -201,7 +340,7 @@ bool WtRunner::initHftStrategies()
 		}
 		else
 		{
-			WTSLogger::error("Trader %s not exists, binding trader to HFT strategy failed", traderid);
+			WTSLogger::error("Trader {} not exists, binding trader to HFT strategy failed", traderid);
 		}
 
 		_hft_engine.addContext(HftContextPtr(ctx));
@@ -219,16 +358,16 @@ bool WtRunner::initEngine()
 
 	const char* name = cfg->getCString("name");
 	
-	if (strlen(name) == 0 || my_stricmp(name, "cta") == 0)
+	if (strlen(name) == 0 || wt_stricmp(name, "cta") == 0)
 	{
 		_is_hft = false;
 		_is_sel = false;
 	}
-	else if (my_stricmp(name, "sel") == 0)
+	else if (wt_stricmp(name, "sel") == 0)
 	{
 		_is_sel = true;
 	}
-	else //if (my_stricmp(name, "hft") == 0)
+	else //if (wt_stricmp(name, "hft") == 0)
 	{
 		_is_hft = true;
 	}
@@ -236,19 +375,19 @@ bool WtRunner::initEngine()
 	if (_is_hft)
 	{
 		WTSLogger::info("Trading enviroment initialzied with engine: HFT");
-		_hft_engine.init(cfg, &_bd_mgr, &_data_mgr, &_hot_mgr);
+		_hft_engine.init(cfg, &_bd_mgr, &_data_mgr, &_hot_mgr, &_notifier);
 		_engine = &_hft_engine;
 	}
 	else if (_is_sel)
 	{
 		WTSLogger::info("Trading enviroment initialzied with engine: SEL");
-		_sel_engine.init(cfg, &_bd_mgr, &_data_mgr, &_hot_mgr);
+		_sel_engine.init(cfg, &_bd_mgr, &_data_mgr, &_hot_mgr, &_notifier);
 		_engine = &_sel_engine;
 	}
 	else
 	{
 		WTSLogger::info("Trading enviroment initialzied with engine: CTA");
-		_cta_engine.init(cfg, &_bd_mgr, &_data_mgr, &_hot_mgr);
+		_cta_engine.init(cfg, &_bd_mgr, &_data_mgr, &_hot_mgr, &_notifier);
 		_engine = &_cta_engine;
 	}
 
@@ -274,61 +413,110 @@ bool WtRunner::initDataMgr()
 	return true;
 }
 
-bool WtRunner::initParsers()
+bool WtRunner::initParsers(WTSVariant* cfgParser)
 {
-	WTSVariant* cfg = _config->get("parsers");
-	if (cfg == NULL)
+	if (cfgParser == NULL)
 		return false;
 
 	uint32_t count = 0;
-	for (uint32_t idx = 0; idx < cfg->size(); idx++)
+	for (uint32_t idx = 0; idx < cfgParser->size(); idx++)
 	{
-		WTSVariant* cfgItem = cfg->get(idx);
+		WTSVariant* cfgItem = cfgParser->get(idx);
 		if(!cfgItem->getBoolean("active"))
 			continue;
 
 		const char* id = cfgItem->getCString("id");
+		// By Wesley @ 2021.12.14
+		// 如果id为空，则生成自动id
+		std::string realid = id;
+		if (realid.empty())
+		{
+			static uint32_t auto_parserid = 1000;
+			realid = StrUtil::printf("auto_parser_%u", auto_parserid++);
+		}
 
 		ParserAdapterPtr adapter(new ParserAdapter);
-		adapter->init(id, cfgItem, _engine, &_bd_mgr, &_hot_mgr);
-
-		_parsers.addAdapter(id, adapter);
+		adapter->init(realid.c_str(), cfgItem, _engine, &_bd_mgr, &_hot_mgr);
+		_parsers.addAdapter(realid.c_str(), adapter);
 
 		count++;
 	}
 
-	WTSLogger::info("%u parsers loaded", count);
+	WTSLogger::info("{} parsers loaded", count);
 	return true;
 }
 
-bool WtRunner::initExecuters()
+bool WtRunner::initExecuters(WTSVariant* cfgExecuter)
 {
-	WTSVariant* cfg = _config->get("executers");
-	if (cfg == NULL || cfg->type() != WTSVariant::VT_Array)
+	if (cfgExecuter == NULL || cfgExecuter->type() != WTSVariant::VT_Array)
 		return false;
 
 	std::string path = WtHelper::getCWD() + "executer/";
 	_exe_factory.loadFactories(path.c_str());
 
 	uint32_t count = 0;
-	for (uint32_t idx = 0; idx < cfg->size(); idx++)
+	for (uint32_t idx = 0; idx < cfgExecuter->size(); idx++)
 	{
-		WTSVariant* cfgItem = cfg->get(idx);
+		WTSVariant* cfgItem = cfgExecuter->get(idx);
 		if (!cfgItem->getBoolean("active"))
 			continue;
 
 		const char* id = cfgItem->getCString("id");
-		bool bLocal = cfgItem->getBoolean("local");
+		std::string name = cfgItem->getCString("name");	//local,diff,dist
+		if (name.empty())
+			name = "local";
 
-		if (bLocal)
+		if (name == "local")
 		{
 			WtLocalExecuter* executer = new WtLocalExecuter(&_exe_factory, id, &_data_mgr);
 			if (!executer->init(cfgItem))
 				return false;
 
-			TraderAdapterPtr trader = _traders.getAdapter(cfgItem->getCString("trader"));
-			executer->setTrader(trader.get());
-			trader->addSink(executer);
+			const char* tid = cfgItem->getCString("trader");
+			if (strlen(tid) == 0)
+			{
+				WTSLogger::error("No Trader configured for Executer {}", id);
+			}
+			else
+			{
+				TraderAdapterPtr trader = _traders.getAdapter(tid);
+				if (trader)
+				{
+					executer->setTrader(trader.get());
+					trader->addSink(executer);
+				}
+				else
+				{
+					WTSLogger::error("Trader {} not exists, cannot configured for executer %s", tid, id);
+				}
+			}
+
+			_cta_engine.addExecuter(ExecCmdPtr(executer));
+		}
+		else if (name == "diff")
+		{
+			WtDiffExecuter* executer = new WtDiffExecuter(&_exe_factory, id, &_data_mgr, &_bd_mgr);
+			if (!executer->init(cfgItem))
+				return false;
+
+			const char* tid = cfgItem->getCString("trader");
+			if (strlen(tid) == 0)
+			{
+				WTSLogger::error("No Trader configured for Executer {}", id);
+			}
+			else
+			{
+				TraderAdapterPtr trader = _traders.getAdapter(tid);
+				if (trader)
+				{
+					executer->setTrader(trader.get());
+					trader->addSink(executer);
+				}
+				else
+				{
+					WTSLogger::error("Trader {} not exists, cannot configured for executer %s", tid, id);
+				}
+			}
 
 			_cta_engine.addExecuter(ExecCmdPtr(executer));
 		}
@@ -343,27 +531,26 @@ bool WtRunner::initExecuters()
 		count++;
 	}
 
-	WTSLogger::info("%u executers loaded", count);
+	WTSLogger::info("{} executers loaded", count);
 
 	return true;
 }
 
-bool WtRunner::initTraders()
+bool WtRunner::initTraders(WTSVariant* cfgTrader)
 {
-	WTSVariant* cfg = _config->get("traders");
-	if (cfg == NULL || cfg->type() != WTSVariant::VT_Array)
+	if (cfgTrader == NULL || cfgTrader->type() != WTSVariant::VT_Array)
 		return false;
 	
 	uint32_t count = 0;
-	for (uint32_t idx = 0; idx < cfg->size(); idx++)
+	for (uint32_t idx = 0; idx < cfgTrader->size(); idx++)
 	{
-		WTSVariant* cfgItem = cfg->get(idx);
+		WTSVariant* cfgItem = cfgTrader->get(idx);
 		if (!cfgItem->getBoolean("active"))
 			continue;
 
 		const char* id = cfgItem->getCString("id");
 
-		TraderAdapterPtr adapter(new TraderAdapter);
+		TraderAdapterPtr adapter(new TraderAdapter(&_notifier));
 		adapter->init(id, cfgItem, &_bd_mgr, &_act_policy);
 
 		_traders.addAdapter(id, adapter);
@@ -371,7 +558,7 @@ bool WtRunner::initTraders()
 		count++;
 	}
 
-	WTSLogger::info("%u traders loaded", count);
+	WTSLogger::info("{} traders loaded", count);
 
 	return true;
 }
@@ -387,8 +574,34 @@ void WtRunner::run(bool bAsync /* = false */)
 	}
 	catch (...)
 	{
-		print_stack_trace([](const char* message) {
-			WTSLogger::error(message);
-		});
+		//print_stack_trace([](const char* message) {
+		//	WTSLogger::error(message);
+		//});
 	}
+}
+
+const char* LOG_TAGS[] = {
+	"all",
+	"debug",
+	"info",
+	"warn",
+	"error",
+	"fatal",
+	"none"
+};
+
+void WtRunner::handleLogAppend(WTSLogLevel ll, const char* msg)
+{
+	_notifier.notify_log(LOG_TAGS[ll - 100], msg);
+}
+
+bool WtRunner::initEvtNotifier()
+{
+	WTSVariant* cfg = _config->get("notifier");
+	if (cfg == NULL || cfg->type() != WTSVariant::VT_Object)
+		return false;
+
+	_notifier.init(cfg);
+
+	return true;
 }

@@ -3,20 +3,18 @@
 #include "../WtDtCore/StateMonitor.h"
 #include "../WtDtCore/UDPCaster.h"
 #include "../WtDtCore/WtHelper.h"
+#include "../WtDtCore/IndexFactory.h"
 
 #include "../Includes/WTSSessionInfo.hpp"
-#include "../Share/DLLHelper.hpp"
-#include "../Share/JsonToVariant.hpp"
 #include "../Includes/WTSVariant.hpp"
 
 #include "../WTSTools/WTSHotMgr.h"
 #include "../WTSTools/WTSBaseDataMgr.h"
 #include "../WTSTools/WTSLogger.h"
+#include "../WTSUtils/WTSCfgLoader.h"
 #include "../Share/StrUtil.hpp"
 
 #include "../WTSUtils/SignalHook.hpp"
-
-#include <boost/asio.hpp>
 
 WTSBaseDataMgr	g_baseDataMgr;
 WTSHotMgr		g_hotMgr;
@@ -24,8 +22,10 @@ boost::asio::io_service g_asyncIO;
 StateMonitor	g_stateMon;
 UDPCaster		g_udpCaster;
 DataManager		g_dataMgr;
+ParserAdapterMgr g_parsers;
+IndexFactory	g_idxFactory;
 
-#ifdef _WIN32
+#ifdef _MSC_VER
 #include "../Common/mdump.h"
 DWORD g_dwMainThreadId = 0;
 BOOL WINAPI ConsoleCtrlhandler(DWORD dwCtrlType)
@@ -59,9 +59,10 @@ const char* getBinDir()
 }
 
 
-void initDataMgr(WTSVariant* config)
+void initDataMgr(WTSVariant* config, bool bAlldayMode = false)
 {
-	g_dataMgr.init(config, &g_baseDataMgr, &g_stateMon, &g_udpCaster);
+	//如果是全天模式，则不传递状态机给DataManager
+	g_dataMgr.init(config, &g_baseDataMgr, bAlldayMode ? NULL : &g_stateMon, &g_udpCaster);
 }
 
 void initParsers(WTSVariant* cfg)
@@ -72,77 +73,42 @@ void initParsers(WTSVariant* cfg)
 		if (!cfgItem->getBoolean("active"))
 			continue;
 
-		std::string module = DLLHelper::wrap_module(cfgItem->getCString("module"),"lib");
-		if (!StdFile::exists(module.c_str()))
+		const char* id = cfgItem->getCString("id");
+		// By Wesley @ 2021.12.14
+		// 如果id为空，则生成自动id
+		std::string realid = id;
+		if (realid.empty())
 		{
-			module = WtHelper::get_module_dir();
-			module += "parsers/";
-			module += DLLHelper::wrap_module(cfgItem->getCString("module"), "lib");
+			static uint32_t auto_parserid = 1000;
+			realid = StrUtil::printf("auto_parser_%u", auto_parserid++);
 		}
-		DllHandle libParser = DLLHelper::load_library(module.c_str());
-		if (libParser)
-		{
-			FuncCreateParser pFuncCreateParser = (FuncCreateParser)DLLHelper::get_symbol(libParser, "createParser");
-			if (pFuncCreateParser == NULL)
-			{
-				WTSLogger::error("Initializing of market data parser failed: function createParser not found...");
-			}
 
-			FuncDeleteParser pFuncDeleteParser = (FuncDeleteParser)DLLHelper::get_symbol(libParser, "deleteParser");
-			if (pFuncDeleteParser == NULL)
-			{
-				WTSLogger::error("Initializing of market data parser failed: function deleteParser not found...");
-			}
-
-			if (pFuncCreateParser && pFuncDeleteParser)
-			{
-				WTSParams* params = cfgItem->toParams();
-
-				ParserAdapterPtr adapter(new ParserAdapter(&g_baseDataMgr, &g_dataMgr));
-				adapter->initAdapter(params, pFuncCreateParser, pFuncDeleteParser);
-				ParserAdapterMgr::addAdapter(adapter);
-				params->release();
-			}
-
-		}
-		else
-		{
-			WTSLogger::error("Initializing of market data parser failed: loading module %s failed...", module.c_str());
-		}
+		ParserAdapterPtr adapter(new ParserAdapter(&g_baseDataMgr, &g_dataMgr, &g_idxFactory));
+		adapter->init(realid.c_str(), cfgItem);
+		g_parsers.addAdapter(realid.c_str(), adapter);
 	}
 
-	//WTSLogger::info("一共加载%u个Parser", ParserAdapterMgr::size());
-	WTSLogger::info("%u market data parsers loaded in total", ParserAdapterMgr::size());
+	WTSLogger::info("{} market data parsers loaded in total", g_parsers.size());
 }
 
 void initialize()
 {
 	WtHelper::set_module_dir(getBinDir());
 
-	std::string json;
-	StdFile::read_file_content("QFConfig.json", json);
-	rj::Document document;
-	document.Parse(json.c_str());
+	std::string filename("QFConfig.json");
+	if (!StdFile::exists(filename.c_str()))
+		filename = "QFConfig.yaml";
+	if (!StdFile::exists(filename.c_str()))
+		filename = "dtcfg.json";
+	if (!StdFile::exists(filename.c_str()))
+		filename = "dtcfg.yaml";
 
-	WTSVariant* config = WTSVariant::createObject();
-	jsonToVariant(document, config);
-
-	const char* id = config->getCString("id");
-	if (strlen(id) > 0)
+	WTSVariant* config = WTSCfgLoader::load_from_file(filename.c_str());
+	if(config == NULL)
 	{
-#ifdef _WIN32
-		HANDLE hHandle = ::CreateEvent(NULL, TRUE, TRUE, id);
-		DWORD dwErr = GetLastError();
-		if (hHandle != NULL && dwErr == ERROR_ALREADY_EXISTS)
-		{
-			ExitProcess(0);
-			return;
-		}
-#else
-		WTSLogger::error("Single instance mode of QuoteFactory is not OK on linux yet.");
-#endif
+		WTSLogger::error("Loading config file {} failed", filename);
+		return;
 	}
-
 
 	//加载市场信息
 	WTSVariant* cfgBF = config->get("basefiles");
@@ -152,16 +118,36 @@ void initialize()
 		WTSLogger::info("Trading sessions loaded");
 	}
 
-	if (cfgBF->get("commodity"))
+	WTSVariant* cfgItem = cfgBF->get("commodity");
+	if (cfgItem)
 	{
-		g_baseDataMgr.loadCommodities(cfgBF->getCString("commodity"));
-		WTSLogger::info("Commodities loaded");
+		if (cfgItem->type() == WTSVariant::VT_String)
+		{
+			g_baseDataMgr.loadCommodities(cfgItem->asCString());
+		}
+		else if (cfgItem->type() == WTSVariant::VT_Array)
+		{
+			for (uint32_t i = 0; i < cfgItem->size(); i++)
+			{
+				g_baseDataMgr.loadCommodities(cfgItem->get(i)->asCString());
+			}
+		}
 	}
 
-	if (cfgBF->get("contract"))
+	cfgItem = cfgBF->get("contract");
+	if (cfgItem)
 	{
-		g_baseDataMgr.loadContracts(cfgBF->getCString("contract"));
-		WTSLogger::info("Contracts loaded");
+		if (cfgItem->type() == WTSVariant::VT_String)
+		{
+			g_baseDataMgr.loadContracts(cfgItem->asCString());
+		}
+		else if (cfgItem->type() == WTSVariant::VT_Array)
+		{
+			for (uint32_t i = 0; i < cfgItem->size(); i++)
+			{
+				g_baseDataMgr.loadContracts(cfgItem->get(i)->asCString());
+			}
+		}
 	}
 
 	if (cfgBF->get("holiday"))
@@ -169,40 +155,115 @@ void initialize()
 		g_baseDataMgr.loadHolidays(cfgBF->getCString("holiday"));
 		WTSLogger::info("Holidays loaded");
 	}
-
 	if (cfgBF->get("hot"))
 	{
 		g_hotMgr.loadHots(cfgBF->getCString("hot"));
-		WTSLogger::info("Hot rules loaded");
+		WTSLogger::log_raw(LL_INFO, "Hot rules loaded");
 	}
 
 	if (cfgBF->get("second"))
 	{
 		g_hotMgr.loadSeconds(cfgBF->getCString("second"));
-		WTSLogger::info("Second rules loaded");
+		WTSLogger::log_raw(LL_INFO, "Second rules loaded");
+	}
+
+	if (cfgBF->has("rules"))
+	{
+		auto cfgRules = cfgBF->get("rules");
+		auto tags = cfgRules->memberNames();
+		for (const std::string& ruleTag : tags)
+		{
+			g_hotMgr.loadCustomRules(ruleTag.c_str(), cfgRules->getCString(ruleTag.c_str()));
+			WTSLogger::info("{} rules loaded from {}", ruleTag, cfgRules->getCString(ruleTag.c_str()));
+		}
 	}
 
 	g_udpCaster.init(config->get("broadcaster"), &g_baseDataMgr, &g_dataMgr);
 
-	initDataMgr(config->get("writer"));
+	//By Wesley @ 2021.12.27
+	//全天候模式，不需要再使用状态机
+	bool bAlldayMode = config->getBoolean("allday");
+	if (!bAlldayMode)
+	{
+		g_stateMon.initialize(config->getCString("statemonitor"), &g_baseDataMgr, &g_dataMgr);
+	}
+	else
+	{
+		WTSLogger::info("QuoteFactory will run in allday mode");
+	}
+	initDataMgr(config->get("writer"), bAlldayMode);
 
-	g_stateMon.initialize("statemonitor.json", &g_baseDataMgr, &g_dataMgr);
+	if(config->has("index"))
+	{
+		//如果存在指数模块要，配置指数
+		const char* filename = config->getCString("index");
+		WTSLogger::info("Reading index config from {}...", filename);
+		WTSVariant* var = WTSCfgLoader::load_from_file(filename);
+		if (var)
+		{
+			g_idxFactory.init(var, &g_hotMgr, &g_baseDataMgr, &g_dataMgr);
+			var->release();
+		}
+		else
+		{
+			WTSLogger::error("Loading index config {} failed", filename);
+		}		
+	}
 
-	initParsers(config->get("parsers"));
+	WTSVariant* cfgParser = config->get("parsers");
+	if (cfgParser)
+	{
+		if (cfgParser->type() == WTSVariant::VT_String)
+		{
+			const char* filename = cfgParser->asCString();
+			if (StdFile::exists(filename))
+			{
+				WTSLogger::info("Reading parser config from {}...", filename);
+				WTSVariant* var = WTSCfgLoader::load_from_file(filename);
+				if (var)
+				{
+					initParsers(var->get("parsers"));
+					var->release();
+				}
+				else
+				{
+					WTSLogger::error("Loading parser config {} failed", filename);
+				}
+			}
+			else
+			{
+				WTSLogger::error("Parser configuration {} not exists", filename);
+			}
+		}
+		else if (cfgParser->type() == WTSVariant::VT_Array)
+		{
+			initParsers(cfgParser);
+		}
+	}
 
 	config->release();
 
-	g_asyncIO.post([](){
-		std::this_thread::sleep_for(std::chrono::milliseconds(5));
-		g_stateMon.run();
+	g_asyncIO.post([bAlldayMode](){
+		g_parsers.run();
+
+		//全天候模式，不启动状态机
+		if(!bAlldayMode)
+		{
+			std::this_thread::sleep_for(std::chrono::milliseconds(5));
+			g_stateMon.run();
+		}
 	});
 }
 
 int main()
 {
-	WTSLogger::init();
+	std::string filename = "logcfgdt.json";
+	if (!StdFile::exists(filename.c_str()))
+		filename = "logcfgdt.yaml";
 
-#ifdef _WIN32
+	WTSLogger::init(filename.c_str());
+
+#ifdef _MSC_VER
 	_CrtSetReportMode(_CRT_WARN, _CRTDBG_MODE_DEBUG);
 	_CrtSetReportMode(_CRT_ERROR, _CRTDBG_MODE_DEBUG);
 	_CrtSetReportMode(_CRT_ASSERT, _CRTDBG_MODE_DEBUG);
@@ -216,9 +277,14 @@ int main()
 	CMiniDumper::Enable("QuoteFactory.exe", true);
 #endif
 
+#if _WIN32
+#pragma message("Signal hooks disabled in WIN32")
+#else
+#pragma message("Signal hooks enabled in UNIX")
 	install_signal_hooks([](const char* message) {
 		WTSLogger::error(message);
 	});
+#endif
 
 	initialize();
 

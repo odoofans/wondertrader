@@ -11,6 +11,9 @@
 #include <string>
 #include <unordered_map>
 
+#include "../Includes/ILogHandler.h"
+
+#include "../WtCore/EventNotifier.h"
 #include "../WtCore/CtaStrategyMgr.h"
 #include "../WtCore/HftStrategyMgr.h"
 #include "../WtCore/SelStrategyMgr.h"
@@ -22,20 +25,20 @@
 #include "../WtCore/WtDistExecuter.h"
 #include "../WtCore/TraderAdapter.h"
 #include "../WtCore/ParserAdapter.h"
-#include "../WtCore/WtDataManager.h"
+#include "../WtCore/WtDtMgr.h"
 #include "../WtCore/ActionPolicyMgr.h"
 
 #include "../WTSTools/WTSHotMgr.h"
 #include "../WTSTools/WTSBaseDataMgr.h"
 
-NS_OTP_BEGIN
+NS_WTP_BEGIN
 class WTSVariant;
 class WtDataStorage;
-NS_OTP_END
+NS_WTP_END
 
-USING_NS_OTP;
+USING_NS_WTP;
 
-class WtRunner
+class WtRunner : public ILogHandler
 {
 public:
 	WtRunner();
@@ -47,20 +50,26 @@ public:
 	 */
 	bool init();
 
-	bool config(const char* cfgFile);
+	bool config();
 
 	void run(bool bAsync = false);
 
 private:
-	bool initTraders();
-	bool initParsers();
-	bool initExecuters();
+	bool initTraders(WTSVariant* cfgTrader);
+	bool initParsers(WTSVariant* cfgParser);
+	bool initExecuters(WTSVariant* cfgExecuter);
 	bool initDataMgr();
+	bool initEvtNotifier();
 	bool initCtaStrategies();
 	bool initHftStrategies();
 	bool initActionPolicy();
 
 	bool initEngine();
+
+//////////////////////////////////////////////////////////////////////////
+//ILogHandler
+public:
+	virtual void handleLogAppend(WTSLogLevel ll, const char* msg) override;
 
 private:
 	WTSVariant*			_config;
@@ -75,10 +84,11 @@ private:
 
 	WtDataStorage*		_data_store;
 
-	WtDataManager		_data_mgr;
+	WtDtMgr				_data_mgr;
 
 	WTSBaseDataMgr		_bd_mgr;
 	WTSHotMgr			_hot_mgr;
+	EventNotifier		_notifier;
 
 	CtaStrategyMgr		_cta_stra_mgr;
 	HftStrategyMgr		_hft_stra_mgr;

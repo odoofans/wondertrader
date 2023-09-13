@@ -28,11 +28,11 @@
 #include "../Includes/WTSVariant.hpp"
 
 //Femas v3.02
-#include "./ustptraderapi/USTPFtdcTraderApi.h"
+#include "../API/Femas3.02/USTPFtdcTraderApi.h"
 
 #include "../Share/DLLHelper.hpp"
 
-USING_NS_OTP;
+USING_NS_WTP;
 
 typedef std::unordered_map<std::string, std::string>	StringMap;
 
@@ -65,7 +65,7 @@ private:
 //////////////////////////////////////////////////////////////////////////
 //ITraderApi接口
 public:
-	virtual bool init(WTSParams* params);
+	virtual bool init(WTSVariant* params);
 
 	virtual void release();
 
@@ -150,6 +150,8 @@ public:
 	///报单操作错误回报
 	virtual void OnErrRtnOrderAction(CUstpFtdcOrderActionField *pOrderAction, CUstpFtdcRspInfoField *pRspInfo) override;
 
+	virtual void OnRtnInstrumentStatus(CUstpFtdcInstrumentStatusField *pInstrumentStatus) override;
+
 protected:
 	bool IsErrorRspInfo(CUstpFtdcRspInfoField *pRspInfo);
 
@@ -190,6 +192,8 @@ protected:
 	std::string		m_strAppID;
 	std::string		m_strAuthCode;
 	std::string		m_strFlowDir;
+
+	std::string		m_strProduct;
 
 	bool			m_bQuickStart;
 

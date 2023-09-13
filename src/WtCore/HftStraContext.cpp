@@ -4,15 +4,15 @@
  *
  * \author Wesley
  * \date 2020/03/30
- * 
- * \brief 
+ *
+ * \brief
  */
 #include "HftStraContext.h"
 #include "../Includes/HftStrategyDefs.h"
 
 
-HftStraContext::HftStraContext(WtHftEngine* engine, const char* name, bool bAgent /* = true */)
-	: HftStraBaseCtx(engine, name, bAgent)
+HftStraContext::HftStraContext(WtHftEngine* engine, const char* name, bool bAgent, int32_t slippage)
+	: HftStraBaseCtx(engine, name, bAgent, slippage)
 	, _strategy(NULL)
 {
 }
@@ -50,8 +50,12 @@ void HftStraContext::on_tick(const char* stdCode, WTSTickData* newTick)
 {
 	update_dyn_profit(stdCode, newTick);
 
-	if (_strategy)
-		_strategy->on_tick(this, stdCode, newTick);
+	auto it = _tick_subs.find(stdCode);
+	if (it != _tick_subs.end())
+	{
+		if (_strategy)
+			_strategy->on_tick(this, stdCode, newTick);
+	}
 
 	HftStraBaseCtx::on_tick(stdCode, newTick);
 }
@@ -104,6 +108,12 @@ void HftStraContext::on_order(uint32_t localid, const char* stdCode, bool isBuy,
 		_strategy->on_order(this, localid, innerCode, isBuy, totalQty, leftQty, price, isCanceled, getOrderTag(localid));
 
 	HftStraBaseCtx::on_order(localid, innerCode, isBuy, totalQty, leftQty, price, isCanceled);
+}
+
+void HftStraContext::on_position(const char* stdCode, bool isLong, double prevol, double preavail, double newvol, double newavail, uint32_t tradingday)
+{
+	if (_strategy)
+		_strategy->on_position(this, stdCode, isLong, prevol, preavail, newvol, newavail);
 }
 
 void HftStraContext::on_channel_ready()

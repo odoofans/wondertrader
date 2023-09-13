@@ -13,58 +13,16 @@
 #include "../WtCore/WtHelper.h"
 #include "../WTSTools/WTSLogger.h"
 #include "../Includes/WTSTradeDef.hpp"
-
-#include "../Share/decimal.h"
-#include "../Share/StrUtil.hpp"
 #include "../Includes/WTSVersion.h"
 
-std::string g_bin_dir;
-
-void inst_hlp() {}
-
 #ifdef _WIN32
-#include "../Common/mdump.h"
-#ifdef _WIN64
-char PLATFORM_NAME[] = "X64";
-#else
-char PLATFORM_NAME[] = "WIN32";
+#   ifdef _WIN64
+    char PLATFORM_NAME[] = "X64";
+#   else
+    char PLATFORM_NAME[] = "X86";
 #endif
-
-HMODULE	g_dllModule = NULL;
-
-BOOL APIENTRY DllMain(
-	HANDLE hModule,
-	DWORD  ul_reason_for_call,
-	LPVOID lpReserved
-	)
-{
-	switch (ul_reason_for_call)
-	{
-	case DLL_PROCESS_ATTACH:
-		g_dllModule = (HMODULE)hModule;
-		break;
-	}
-	return TRUE;
-}
-
 #else
-#include <dlfcn.h>
-
-char PLATFORM_NAME[] = "UNIX";
-
-const std::string& getInstPath()
-{
-	static std::string moduleName;
-	if (moduleName.empty())
-	{
-		Dl_info dl_info;
-		dladdr((void *)inst_hlp, &dl_info);
-		moduleName = dl_info.dli_fname;
-		//printf("1:%s\n", moduleName.c_str());
-	}
-
-	return moduleName;
-}
+    char PLATFORM_NAME[] = "UNIX";
 #endif
 
 WtRtRunner& getRunner()
@@ -73,51 +31,15 @@ WtRtRunner& getRunner()
 	return runner;
 }
 
-const char* getModuleName()
-{
-	static char MODULE_NAME[250] = { 0 };
-	if (strlen(MODULE_NAME) == 0)
-	{
-#ifdef _WIN32
-		GetModuleFileName(g_dllModule, MODULE_NAME, 250);
-		boost::filesystem::path p(MODULE_NAME);
-		strcpy(MODULE_NAME, p.filename().string().c_str());
-#else
-		boost::filesystem::path p(getInstPath());
-		strcpy(MODULE_NAME, p.filename().string().c_str());
-#endif
-	}
-
-	return MODULE_NAME;
-}
-
-const char* getBinDir()
-{
-	if (g_bin_dir.empty())
-	{
-#ifdef _WIN32
-		char strPath[MAX_PATH];
-		GetModuleFileName(g_dllModule, strPath, MAX_PATH);
-
-		g_bin_dir = StrUtil::standardisePath(strPath, false);
-#else
-		g_bin_dir = getInstPath();
-#endif
-		boost::filesystem::path p(g_bin_dir);
-		g_bin_dir = p.branch_path().string() + "/";
-	}
-
-	return g_bin_dir.c_str();
-}
 
 void register_evt_callback(FuncEventCallback cbEvt)
 {
 	getRunner().registerEvtCallback(cbEvt);
 }
 
-void register_cta_callbacks(FuncStraInitCallback cbInit, FuncStraTickCallback cbTick, FuncStraCalcCallback cbCalc, FuncStraBarCallback cbBar, FuncSessionEvtCallback cbSessEvt)
+void register_cta_callbacks(FuncStraInitCallback cbInit, FuncStraTickCallback cbTick, FuncStraCalcCallback cbCalc, FuncStraBarCallback cbBar, FuncSessionEvtCallback cbSessEvt, FuncStraCondTriggerCallback cbCondTrigger/* = NULL*/)
 {
-	getRunner().registerCtaCallbacks(cbInit, cbTick, cbCalc, cbBar, cbSessEvt);
+	getRunner().registerCtaCallbacks(cbInit, cbTick, cbCalc, cbBar, cbSessEvt, cbCondTrigger);
 }
 
 void register_sel_callbacks(FuncStraInitCallback cbInit, FuncStraTickCallback cbTick, FuncStraCalcCallback cbCalc, FuncStraBarCallback cbBar, FuncSessionEvtCallback cbSessEvt)
@@ -127,9 +49,9 @@ void register_sel_callbacks(FuncStraInitCallback cbInit, FuncStraTickCallback cb
 
 void register_hft_callbacks(FuncStraInitCallback cbInit, FuncStraTickCallback cbTick, FuncStraBarCallback cbBar, 
 	FuncHftChannelCallback cbChnl, FuncHftOrdCallback cbOrd, FuncHftTrdCallback cbTrd, FuncHftEntrustCallback cbEntrust,
-	FuncStraOrdDtlCallback cbOrdDtl, FuncStraOrdQueCallback cbOrdQue, FuncStraTransCallback cbTrans, FuncSessionEvtCallback cbSessEvt)
+	FuncStraOrdDtlCallback cbOrdDtl, FuncStraOrdQueCallback cbOrdQue, FuncStraTransCallback cbTrans, FuncSessionEvtCallback cbSessEvt, FuncHftPosCallback cbPosition)
 {
-	getRunner().registerHftCallbacks(cbInit, cbTick, cbBar, cbChnl, cbOrd, cbTrd, cbEntrust, cbOrdDtl, cbOrdQue, cbTrans, cbSessEvt);
+	getRunner().registerHftCallbacks(cbInit, cbTick, cbBar, cbChnl, cbOrd, cbTrd, cbEntrust, cbOrdDtl, cbOrdQue, cbTrans, cbSessEvt, cbPosition);
 }
 
 void register_parser_callbacks(FuncParserEvtCallback cbEvt, FuncParserSubCallback cbSub)
@@ -152,15 +74,32 @@ bool create_ext_executer(const char* id)
 	return getRunner().createExtExecuter(id);
 }
 
+void register_ext_data_loader(FuncLoadFnlBars fnlBarLoader, FuncLoadRawBars rawBarLoader, FuncLoadAdjFactors fctLoader, FuncLoadRawTicks tickLoader)
+{
+	getRunner().registerExtDataLoader(fnlBarLoader, rawBarLoader, fctLoader, tickLoader);
+}
+
+void feed_raw_bars(WTSBarStruct* bars, WtUInt32 count)
+{
+	getRunner().feedRawBars(bars, count);
+}
+
+void feed_adj_factors(WtString stdCode, WtUInt32* dates, double* factors, WtUInt32 count)
+{
+	getRunner().feedAdjFactors(stdCode, (uint32_t*)dates, factors, count);
+}
+
+void feed_raw_ticks(WTSTickStruct* ticks, WtUInt32 count)
+{
+	WTSLogger::error("API not implemented");
+}
+
 void init_porter(const char* logProfile, bool isFile, const char* genDir)
 {
 	static bool inited = false;
 
 	if (inited)
 		return;
-#ifdef _WIN32
-	CMiniDumper::Enable(getModuleName(), true, WtHelper::getCWD().c_str());
-#endif
 
 	getRunner().init(logProfile, isFile, genDir);
 
@@ -201,20 +140,20 @@ const char* get_version()
 	return _ver.c_str();
 }
 
-void dump_bars(const char* stdCode, const char* period, FuncDumpBarsCallback cb, FuncCountDataCallback cbCnt)
+const char* get_raw_stdcode(const char* stdCode)
 {
-	getRunner().dump_bars(stdCode, period, cb, cbCnt);
+	return getRunner().get_raw_stdcode(stdCode);
 }
 
 void write_log(WtUInt32 level, const char* message, const char* catName)
 {
 	if (strlen(catName) > 0)
 	{
-		WTSLogger::log2(catName, (WTSLogLevel)level, message);
+		WTSLogger::log_raw_by_cat(catName, (WTSLogLevel)level, message);
 	}
 	else
 	{
-		WTSLogger::log((WTSLogLevel)level, message);
+		WTSLogger::log_raw((WTSLogLevel)level, message);
 	}
 }
 
@@ -241,9 +180,9 @@ bool reg_exe_factories(const char* factFolder)
 
 #pragma region "CTA策略接口"
 
-CtxHandler create_cta_context(const char* name)
+CtxHandler create_cta_context(const char* name, int slippage)
 {
-	return getRunner().createCtaContext(name);
+	return getRunner().createCtaContext(name, slippage);
 }
 
 void cta_enter_long(CtxHandler cHandle, const char* stdCode, double qty, const char* userTag, double limitprice, double stopprice)
@@ -292,16 +231,13 @@ WtUInt32 cta_get_bars(CtxHandler cHandle, const char* stdCode, const char* perio
 		WTSKlineSlice* kData = ctx->stra_get_bars(stdCode, period, barCnt, isMain);
 		if (kData)
 		{
-			uint32_t left = barCnt + 1;
-			uint32_t reaCnt = 0;
-			uint32_t kcnt = kData->size();
-			for (uint32_t idx = 0; idx < kcnt && left > 0; idx++, left--)
-			{
-				WTSBarStruct* curBar = kData->at(idx);
+			WtUInt32 reaCnt = (WtUInt32)kData->size();
 
-				bool isLast = (idx == kcnt - 1) || (left == 1);
-				cb(cHandle, stdCode, period, curBar, isLast);
-				reaCnt += 1;
+			uint32_t blkCnt = kData->get_block_counts();
+			for (uint32_t i = 0; i < blkCnt; i++)
+			{
+				if(kData->get_block_addr(i) != NULL)
+					cb(cHandle, stdCode, period, kData->get_block_addr(i), kData->get_block_size(i), i == blkCnt - 1);
 			}
 
 			kData->release();
@@ -318,7 +254,7 @@ WtUInt32 cta_get_bars(CtxHandler cHandle, const char* stdCode, const char* perio
 	}
 }
 
-WtUInt32	cta_get_ticks(CtxHandler cHandle, const char* stdCode, WtUInt32 tickCnt, bool isMain, FuncGetTicksCallback cb)
+WtUInt32	cta_get_ticks(CtxHandler cHandle, const char* stdCode, WtUInt32 tickCnt, FuncGetTicksCallback cb)
 {
 	CtaContextPtr ctx = getRunner().getCtaContext(cHandle);
 	if (ctx == NULL)
@@ -328,19 +264,10 @@ WtUInt32	cta_get_ticks(CtxHandler cHandle, const char* stdCode, WtUInt32 tickCnt
 		WTSTickSlice* tData = ctx->stra_get_ticks(stdCode, tickCnt);
 		if (tData)
 		{
-			uint32_t left = tickCnt + 1;
-			uint32_t reaCnt = 0;
-			uint32_t tcnt = tData->size();
-			for (uint32_t idx = 0; idx < tcnt && left > 0; idx++, left--)
-			{
-				WTSTickStruct* curTick = (WTSTickStruct*)tData->at(idx);
-				bool isLast = (idx == tcnt - 1) || (left == 1);
-				cb(cHandle, stdCode, curTick, isLast);
-				reaCnt += 1;
-			}
-
+			uint32_t thisCnt = min(tickCnt, (WtUInt32)tData->size());
+			cb(cHandle, stdCode, (WTSTickStruct*)tData->at(0), thisCnt, true);
 			tData->release();
-			return reaCnt;
+			return thisCnt;
 		}
 		else
 		{
@@ -414,13 +341,13 @@ void cta_get_all_position(CtxHandler cHandle, FuncGetPositionCallback cb)
 	cb(cHandle, "", 0, true);
 }
 
-double cta_get_position(CtxHandler cHandle, const char* stdCode, const char* openTag)
+double cta_get_position(CtxHandler cHandle, const char* stdCode, bool bOnlyValid, const char* openTag)
 {
 	CtaContextPtr ctx = getRunner().getCtaContext(cHandle);
 	if (ctx == NULL)
 		return 0;
 
-	return ctx->stra_get_position(stdCode, openTag);
+	return ctx->stra_get_position(stdCode, bOnlyValid, openTag);
 }
 
 double cta_get_fund_data(CtxHandler cHandle, int flag)
@@ -479,9 +406,23 @@ double cta_get_last_enterprice(CtxHandler cHandle, const char* stdCode)
 	return ctx->stra_get_last_enterprice(stdCode);
 }
 
+WtString cta_get_last_entertag(CtxHandler cHandle, const char* stdCode)
+{
+	CtaContextPtr ctx = getRunner().getCtaContext(cHandle);
+	if (ctx == NULL)
+		return 0;
+
+	return ctx->stra_get_last_entertag(stdCode);
+}
+
 double cta_get_price(const char* stdCode)
 {
 	return getRunner().getEngine()->get_cur_price(stdCode);
+}
+
+double cta_get_day_price(const char* stdCode, int flag)
+{
+	return getRunner().getEngine()->get_day_price(stdCode, flag);
 }
 
 WtUInt32 cta_get_tdate()
@@ -499,13 +440,29 @@ WtUInt32 cta_get_time()
 	return getRunner().getEngine()->get_min_time();
 }
 
-void cta_log_text(CtxHandler cHandle, const char* message)
+void cta_log_text(CtxHandler cHandle, WtUInt32 level, const char* message)
 {
 	CtaContextPtr ctx = getRunner().getCtaContext(cHandle);
 	if (ctx == NULL)
 		return;
 
-	ctx->stra_log_text(message);
+	switch (level)
+	{
+	case LOG_LEVEL_DEBUG:
+		ctx->stra_log_debug(message);
+		break;
+	case LOG_LEVEL_INFO:
+		ctx->stra_log_info(message);
+		break;
+	case LOG_LEVEL_WARN:
+		ctx->stra_log_warn(message);
+		break;
+	case LOG_LEVEL_ERROR:
+		ctx->stra_log_error(message);
+		break;
+	default:
+		break;
+		}
 }
 
 void cta_save_userdata(CtxHandler cHandle, const char* key, const char* val)
@@ -535,12 +492,66 @@ void cta_sub_ticks(CtxHandler cHandle, const char* stdCode)
 	ctx->stra_sub_ticks(stdCode);
 }
 
+void cta_set_chart_kline(CtxHandler cHandle, const char* stdCode, const char* period)
+{
+	CtaContextPtr ctx = getRunner().getCtaContext(cHandle);
+	if (ctx == NULL)
+		return;
+
+	ctx->set_chart_kline(stdCode, period);
+}
+
+void cta_add_chart_mark(CtxHandler cHandle, double price, const char* icon, const char* tag)
+{
+	CtaContextPtr ctx = getRunner().getCtaContext(cHandle);
+	if (ctx == NULL)
+		return;
+
+	ctx->add_chart_mark(price, icon, tag);
+}
+
+void cta_register_index(CtxHandler cHandle, const char* idxName, WtUInt32 indexType)
+{
+	CtaContextPtr ctx = getRunner().getCtaContext(cHandle);
+	if (ctx == NULL)
+		return;
+
+	ctx->register_index(idxName, indexType);
+}
+
+bool cta_register_index_line(CtxHandler cHandle, const char* idxName, const char* lineName, WtUInt32 lineType)
+{
+	CtaContextPtr ctx = getRunner().getCtaContext(cHandle);
+	if (ctx == NULL)
+		return false;
+
+	return ctx->register_index_line(idxName, lineName, lineType);
+}
+bool cta_add_index_baseline(CtxHandler cHandle, const char* idxName, const char* lineName, double val)
+{
+	CtaContextPtr ctx = getRunner().getCtaContext(cHandle);
+	if (ctx == NULL)
+		return false;
+
+	return ctx->add_index_baseline(idxName, lineName, val);
+}
+
+bool cta_set_index_value(CtxHandler cHandle, const char* idxName, const char* lineName, double val)
+{
+	CtaContextPtr ctx = getRunner().getCtaContext(cHandle);
+	if (ctx == NULL)
+		return false;
+
+	return ctx->set_index_value(idxName, lineName, val);
+}
+
+
 #pragma endregion
 
 #pragma region "多因子策略接口"
-CtxHandler create_sel_context(const char* name, uint32_t date, uint32_t time, const char* period, const char* trdtpl/* = "CHINA"*/, const char* session/* = "TRADING"*/)
+CtxHandler create_sel_context(const char* name, uint32_t date, uint32_t time, const char* period, const char* trdtpl/* = "CHINA"*/, const char* session/* = "TRADING"*/, int32_t slippage/* = 0*/)
 {
-	return getRunner().createSelContext(name, date, time, period, trdtpl, session);
+	return getRunner().createSelContext(name, date, time, period, slippage, trdtpl, session);
 }
 
 
@@ -562,13 +573,29 @@ WtString sel_load_userdata(CtxHandler cHandle, const char* key, const char* defV
 	return ctx->stra_load_user_data(key, defVal);
 }
 
-void sel_log_text(CtxHandler cHandle, const char* message)
+void sel_log_text(CtxHandler cHandle, WtUInt32 level, const char* message)
 {
 	SelContextPtr ctx = getRunner().getSelContext(cHandle);
 	if (ctx == NULL)
 		return;
 
-	ctx->stra_log_text(message);
+	switch (level)
+	{
+	case LOG_LEVEL_DEBUG:
+		ctx->stra_log_debug(message);
+		break;
+	case LOG_LEVEL_INFO:
+		ctx->stra_log_info(message);
+		break;
+	case LOG_LEVEL_WARN:
+		ctx->stra_log_warn(message);
+		break;
+	case LOG_LEVEL_ERROR:
+		ctx->stra_log_error(message);
+		break;
+	default:
+		break;
+	}
 }
 
 double sel_get_price(const char* stdCode)
@@ -602,13 +629,13 @@ void sel_get_all_position(CtxHandler cHandle, FuncGetPositionCallback cb)
 	cb(cHandle, "", 0, true);
 }
 
-double sel_get_position(CtxHandler cHandle, const char* stdCode, const char* openTag)
+double sel_get_position(CtxHandler cHandle, const char* stdCode, bool bOnlyValid, const char* openTag)
 {
 	SelContextPtr ctx = getRunner().getSelContext(cHandle);
 	if (ctx == NULL)
 		return 0;
 
-	return ctx->stra_get_position(stdCode, openTag);
+	return ctx->stra_get_position(stdCode, bOnlyValid, openTag);
 }
 
 WtUInt32 sel_get_bars(CtxHandler cHandle, const char* stdCode, const char* period, WtUInt32 barCnt, FuncGetBarsCallback cb)
@@ -621,17 +648,10 @@ WtUInt32 sel_get_bars(CtxHandler cHandle, const char* stdCode, const char* perio
 		WTSKlineSlice* kData = ctx->stra_get_bars(stdCode, period, barCnt);
 		if (kData)
 		{
-			uint32_t left = barCnt + 1;
-			uint32_t reaCnt = 0;
-			uint32_t kcnt = kData->size();
-			for (uint32_t idx = 0; idx < kcnt && left > 0; idx++, left--)
-			{
-				WTSBarStruct* curBar = kData->at(idx);
+			WtUInt32 reaCnt = (WtUInt32)kData->size();
 
-				bool isLast = (idx == kcnt - 1) || (left == 1);
-				cb(cHandle, stdCode, period, curBar, isLast);
-				reaCnt += 1;
-			}
+			for (uint32_t i = 0; i < kData->get_block_counts(); i++)
+				cb(cHandle, stdCode, period, kData->get_block_addr(i), kData->get_block_size(i), i == kData->get_block_counts() - 1);
 
 			kData->release();
 			return reaCnt;
@@ -657,7 +677,7 @@ void sel_set_position(CtxHandler cHandle, const char* stdCode, double qty, const
 	ctx->stra_set_position(stdCode, qty, userTag);
 }
 
-WtUInt32	sel_get_ticks(CtxHandler cHandle, const char* stdCode, WtUInt32 tickCnt, bool isMain, FuncGetTicksCallback cb)
+WtUInt32	sel_get_ticks(CtxHandler cHandle, const char* stdCode, WtUInt32 tickCnt, FuncGetTicksCallback cb)
 {
 	SelContextPtr ctx = getRunner().getSelContext(cHandle);
 	if (ctx == NULL)
@@ -667,19 +687,13 @@ WtUInt32	sel_get_ticks(CtxHandler cHandle, const char* stdCode, WtUInt32 tickCnt
 		WTSTickSlice* tData = ctx->stra_get_ticks(stdCode, tickCnt);
 		if (tData)
 		{
-			uint32_t left = tickCnt + 1;
-			uint32_t reaCnt = 0;
-			uint32_t tcnt = tData->size();
-			for (uint32_t idx = 0; idx < tcnt && left > 0; idx++, left--)
-			{
-				WTSTickStruct* curTick = (WTSTickStruct*)tData->at(idx);
-				bool isLast = (idx == tcnt - 1) || (left == 1);
-				cb(cHandle, stdCode, curTick, isLast);
-				reaCnt += 1;
-			}
-
+			uint32_t thisCnt = min(tickCnt, (WtUInt32)tData->size());
+			if (thisCnt != 0)
+				cb(cHandle, stdCode, (WTSTickStruct*)tData->at(0), thisCnt, true);
+			else
+				cb(cHandle, stdCode, NULL, 0, true);
 			tData->release();
-			return reaCnt;
+			return thisCnt;
 		}
 		else
 		{
@@ -700,21 +714,130 @@ void sel_sub_ticks(CtxHandler cHandle, const char* stdCode)
 
 	ctx->stra_sub_ticks(stdCode);
 }
+
+double sel_get_day_price(const char* stdCode, int flag)
+{
+	return getRunner().getEngine()->get_day_price(stdCode, flag);
+}
+
+WtUInt32 sel_get_tdate()
+{
+	return getRunner().getEngine()->get_trading_date();
+}
+
+double sel_get_fund_data(CtxHandler cHandle, int flag)
+{
+	SelContextPtr ctx = getRunner().getSelContext(cHandle);
+	if (ctx == NULL)
+		return 0;
+
+	return ctx->stra_get_fund_data(flag);
+}
+
+double sel_get_position_profit(CtxHandler cHandle, const char* stdCode)
+{
+	SelContextPtr ctx = getRunner().getSelContext(cHandle);
+	if (ctx == NULL)
+		return 0;
+
+	return ctx->stra_get_position_profit(stdCode);
+}
+
+WtUInt64 sel_get_detail_entertime(CtxHandler cHandle, const char* stdCode, const char* openTag)
+{
+	SelContextPtr ctx = getRunner().getSelContext(cHandle);
+	if (ctx == NULL)
+		return 0;
+
+	return ctx->stra_get_detail_entertime(stdCode, openTag);
+}
+
+double sel_get_detail_cost(CtxHandler cHandle, const char* stdCode, const char* openTag)
+{
+	SelContextPtr ctx = getRunner().getSelContext(cHandle);
+	if (ctx == NULL)
+		return 0;
+
+	return ctx->stra_get_detail_cost(stdCode, openTag);
+}
+
+double sel_get_detail_profit(CtxHandler cHandle, const char* stdCode, const char* openTag, int flag)
+{
+	SelContextPtr ctx = getRunner().getSelContext(cHandle);
+	if (ctx == NULL)
+		return 0;
+
+	return ctx->stra_get_detail_profit(stdCode, openTag, flag);
+}
+
+double sel_get_position_avgpx(CtxHandler cHandle, const char* stdCode)
+{
+	SelContextPtr ctx = getRunner().getSelContext(cHandle);
+	if (ctx == NULL)
+		return 0;
+
+	return ctx->stra_get_position_avgpx(stdCode);
+}
+
+WtUInt64 sel_get_first_entertime(CtxHandler cHandle, const char* stdCode)
+{
+	SelContextPtr ctx = getRunner().getSelContext(cHandle);
+	if (ctx == NULL)
+		return 0;
+
+	return ctx->stra_get_first_entertime(stdCode);
+}
+
+WtUInt64 sel_get_last_entertime(CtxHandler cHandle, const char* stdCode)
+{
+	SelContextPtr ctx = getRunner().getSelContext(cHandle);
+	if (ctx == NULL)
+		return 0;
+
+	return ctx->stra_get_last_entertime(stdCode);
+}
+
+WtUInt64 sel_get_last_exittime(CtxHandler cHandle, const char* stdCode)
+{
+	SelContextPtr ctx = getRunner().getSelContext(cHandle);
+	if (ctx == NULL)
+		return 0;
+
+	return ctx->stra_get_last_exittime(stdCode);
+}
+
+double sel_get_last_enterprice(CtxHandler cHandle, const char* stdCode)
+{
+	SelContextPtr ctx = getRunner().getSelContext(cHandle);
+	if (ctx == NULL)
+		return 0;
+
+	return ctx->stra_get_last_enterprice(stdCode);
+}
+
+WtString sel_get_last_entertag(CtxHandler cHandle, const char* stdCode)
+{
+	SelContextPtr ctx = getRunner().getSelContext(cHandle);
+	if (ctx == NULL)
+		return 0;
+
+	return ctx->stra_get_last_entertag(stdCode);
+}
 #pragma endregion
 
 #pragma region "HFT策略接口"
-CtxHandler create_hft_context(const char* name, const char* trader, bool agent)
+CtxHandler create_hft_context(const char* name, const char* trader, bool agent, int32_t slippage/* = 0*/)
 {
-	return getRunner().createHftContext(name, trader, agent);
+	return getRunner().createHftContext(name, trader, agent, slippage);
 }
 
-double hft_get_position(CtxHandler cHandle, const char* stdCode)
+double hft_get_position(CtxHandler cHandle, const char* stdCode, bool bOnlyValid)
 {
 	HftContextPtr ctx = getRunner().getHftContext(cHandle);
 	if (ctx == NULL)
 		return 0;
 
-	return ctx->stra_get_position(stdCode);
+	return ctx->stra_get_position(stdCode, bOnlyValid);
 }
 
 double hft_get_position_profit(CtxHandler cHandle, const char* stdCode)
@@ -726,6 +849,14 @@ double hft_get_position_profit(CtxHandler cHandle, const char* stdCode)
 	return ctx->stra_get_position_profit(stdCode);
 }
 
+double hft_get_position_avgpx(CtxHandler cHandle, const char* stdCode)
+{
+	HftContextPtr ctx = getRunner().getHftContext(cHandle);
+	if (ctx == NULL)
+		return 0;
+
+	return ctx->stra_get_position_avgpx(stdCode);
+}
 
 double hft_get_undone(CtxHandler cHandle, const char* stdCode)
 {
@@ -767,17 +898,10 @@ WtUInt32 hft_get_bars(CtxHandler cHandle, const char* stdCode, const char* perio
 		WTSKlineSlice* kData = ctx->stra_get_bars(stdCode, period, barCnt);
 		if (kData)
 		{
-			uint32_t left = barCnt + 1;
-			uint32_t reaCnt = 0;
-			uint32_t kcnt = kData->size();
-			for (uint32_t idx = 0; idx < kcnt && left > 0; idx++, left--)
-			{
-				WTSBarStruct* curBar = kData->at(idx);
+			WtUInt32 reaCnt = (WtUInt32)kData->size();
 
-				bool isLast = (idx == kcnt - 1) || (left == 1);
-				cb(cHandle, stdCode, period, curBar, isLast);
-				reaCnt += 1;
-			}
+			for (uint32_t i = 0; i < kData->get_block_counts(); i++)
+				cb(cHandle, stdCode, period, kData->get_block_addr(i), kData->get_block_size(i), i == kData->get_block_counts() - 1);
 
 			kData->release();
 			return reaCnt;
@@ -803,19 +927,13 @@ WtUInt32 hft_get_ticks(CtxHandler cHandle, const char* stdCode, WtUInt32 tickCnt
 		WTSTickSlice* tData = ctx->stra_get_ticks(stdCode, tickCnt);
 		if (tData)
 		{
-			uint32_t left = tickCnt + 1;
-			uint32_t reaCnt = 0;
-			uint32_t tcnt = tData->size();
-			for (uint32_t idx = 0; idx < tcnt && left > 0; idx++, left--)
-			{
-				WTSTickStruct* curTick = (WTSTickStruct*)tData->at(idx);
-				bool isLast = (idx == tcnt - 1) || (left == 1);
-				cb(cHandle, stdCode, curTick, isLast);
-				reaCnt += 1;
-			}
-
+			uint32_t thisCnt = min(tickCnt, (WtUInt32)tData->size());
+			if (thisCnt != 0)
+				cb(cHandle, stdCode, (WTSTickStruct*)tData->at(0), thisCnt, true);
+			else
+				cb(cHandle, stdCode, NULL, 0, true);
 			tData->release();
-			return reaCnt;
+			return thisCnt;
 		}
 		else
 		{
@@ -828,29 +946,20 @@ WtUInt32 hft_get_ticks(CtxHandler cHandle, const char* stdCode, WtUInt32 tickCnt
 	}
 }
 
-WtUInt32 hft_get_ordque(CtxHandler cHandle, const char* stdCode, WtUInt32 tickCnt, FuncGetOrdQueCallback cb)
+WtUInt32 hft_get_ordque(CtxHandler cHandle, const char* stdCode, WtUInt32 itemCnt, FuncGetOrdQueCallback cb)
 {
 	HftContextPtr ctx = getRunner().getHftContext(cHandle);
 	if (ctx == NULL)
 		return 0;
 	try
 	{
-		WTSOrdQueSlice* dataSlice = ctx->stra_get_order_queue(stdCode, tickCnt);
+		WTSOrdQueSlice* dataSlice = ctx->stra_get_order_queue(stdCode, itemCnt);
 		if (dataSlice)
 		{
-			uint32_t left = tickCnt + 1;
-			uint32_t reaCnt = 0;
-			uint32_t tcnt = dataSlice->size();
-			for (uint32_t idx = 0; idx < tcnt && left > 0; idx++, left--)
-			{
-				WTSOrdQueStruct* curItem = (WTSOrdQueStruct*)dataSlice->at(idx);
-				bool isLast = (idx == tcnt - 1) || (left == 1);
-				cb(cHandle, stdCode, curItem, isLast);
-				reaCnt += 1;
-			}
-
+			uint32_t thisCnt = min(itemCnt, (WtUInt32)dataSlice->size());
+			cb(cHandle, stdCode, (WTSOrdQueStruct*)dataSlice->at(0), thisCnt, true);
 			dataSlice->release();
-			return reaCnt;
+			return thisCnt;
 		}
 		else
 		{
@@ -863,29 +972,20 @@ WtUInt32 hft_get_ordque(CtxHandler cHandle, const char* stdCode, WtUInt32 tickCn
 	}
 }
 
-WtUInt32 hft_get_orddtl(CtxHandler cHandle, const char* stdCode, WtUInt32 tickCnt, FuncGetOrdDtlCallback cb)
+WtUInt32 hft_get_orddtl(CtxHandler cHandle, const char* stdCode, WtUInt32 itemCnt, FuncGetOrdDtlCallback cb)
 {
 	HftContextPtr ctx = getRunner().getHftContext(cHandle);
 	if (ctx == NULL)
 		return 0;
 	try
 	{
-		WTSOrdDtlSlice* dataSlice = ctx->stra_get_order_detail(stdCode, tickCnt);
+		WTSOrdDtlSlice* dataSlice = ctx->stra_get_order_detail(stdCode, itemCnt);
 		if (dataSlice)
 		{
-			uint32_t left = tickCnt + 1;
-			uint32_t reaCnt = 0;
-			uint32_t tcnt = dataSlice->size();
-			for (uint32_t idx = 0; idx < tcnt && left > 0; idx++, left--)
-			{
-				WTSOrdDtlStruct* curItem = (WTSOrdDtlStruct*)dataSlice->at(idx);
-				bool isLast = (idx == tcnt - 1) || (left == 1);
-				cb(cHandle, stdCode, curItem, isLast);
-				reaCnt += 1;
-			}
-
+			uint32_t thisCnt = min(itemCnt, (WtUInt32)dataSlice->size());
+			cb(cHandle, stdCode, (WTSOrdDtlStruct*)dataSlice->at(0), thisCnt, true);
 			dataSlice->release();
-			return reaCnt;
+			return thisCnt;
 		}
 		else
 		{
@@ -898,29 +998,20 @@ WtUInt32 hft_get_orddtl(CtxHandler cHandle, const char* stdCode, WtUInt32 tickCn
 	}
 }
 
-WtUInt32 hft_get_trans(CtxHandler cHandle, const char* stdCode, WtUInt32 tickCnt, FuncGetTransCallback cb)
+WtUInt32 hft_get_trans(CtxHandler cHandle, const char* stdCode, WtUInt32 itemCnt, FuncGetTransCallback cb)
 {
 	HftContextPtr ctx = getRunner().getHftContext(cHandle);
 	if (ctx == NULL)
 		return 0;
 	try
 	{
-		WTSTransSlice* dataSlice = ctx->stra_get_transaction(stdCode, tickCnt);
+		WTSTransSlice* dataSlice = ctx->stra_get_transaction(stdCode, itemCnt);
 		if (dataSlice)
 		{
-			uint32_t left = tickCnt + 1;
-			uint32_t reaCnt = 0;
-			uint32_t tcnt = dataSlice->size();
-			for (uint32_t idx = 0; idx < tcnt && left > 0; idx++, left--)
-			{
-				WTSTransStruct* curItem = (WTSTransStruct*)dataSlice->at(idx);
-				bool isLast = (idx == tcnt - 1) || (left == 1);
-				cb(cHandle, stdCode, curItem, isLast);
-				reaCnt += 1;
-			}
-
+			uint32_t thisCnt = min(itemCnt, (WtUInt32)dataSlice->size());
+			cb(cHandle, stdCode, (WTSTransStruct*)dataSlice->at(0), thisCnt, true);
 			dataSlice->release();
-			return reaCnt;
+			return thisCnt;
 		}
 		else
 		{
@@ -933,13 +1024,29 @@ WtUInt32 hft_get_trans(CtxHandler cHandle, const char* stdCode, WtUInt32 tickCnt
 	}
 }
 
-void hft_log_text(CtxHandler cHandle, const char* message)
+void hft_log_text(CtxHandler cHandle, WtUInt32 level, const char* message)
 {
 	HftContextPtr ctx = getRunner().getHftContext(cHandle);
 	if (ctx == NULL)
 		return;
 
-	ctx->stra_log_text(message);
+	switch (level)
+	{
+	case LOG_LEVEL_DEBUG:
+		ctx->stra_log_debug(message);
+		break;
+	case LOG_LEVEL_INFO:
+		ctx->stra_log_info(message);
+		break;
+	case LOG_LEVEL_WARN:
+		ctx->stra_log_warn(message);
+		break;
+	case LOG_LEVEL_ERROR:
+		ctx->stra_log_error(message);
+		break;
+	default:
+		break;
+	}
 }
 
 void hft_sub_ticks(CtxHandler cHandle, const char* stdCode)
@@ -993,7 +1100,7 @@ WtString hft_cancel_all(CtxHandler cHandle, const char* stdCode, bool isBuy)
 	if (ctx == NULL)
 		return "";
 
-	static std::string ret;
+	static thread_local std::string ret;
 
 	std::stringstream ss;
 	OrderIDs ids = ctx->stra_cancel(stdCode, isBuy, DBL_MAX);
@@ -1008,7 +1115,7 @@ WtString hft_cancel_all(CtxHandler cHandle, const char* stdCode, bool isBuy)
 	return ret.c_str();
 }
 
-WtString hft_buy(CtxHandler cHandle, const char* stdCode, double price, double qty, const char* userTag)
+WtString hft_buy(CtxHandler cHandle, const char* stdCode, double price, double qty, const char* userTag, int flag)
 {
 	HftContextPtr ctx = getRunner().getHftContext(cHandle);
 	if (ctx == NULL)
@@ -1017,7 +1124,7 @@ WtString hft_buy(CtxHandler cHandle, const char* stdCode, double price, double q
 	static std::string ret;
 
 	std::stringstream ss;
-	OrderIDs ids = ctx->stra_buy(stdCode, price, qty, userTag);
+	OrderIDs ids = ctx->stra_buy(stdCode, price, qty, userTag, flag);
 	for (uint32_t localid : ids)
 	{
 		ss << localid << ",";
@@ -1029,7 +1136,7 @@ WtString hft_buy(CtxHandler cHandle, const char* stdCode, double price, double q
 	return ret.c_str();
 }
 
-WtString hft_sell(CtxHandler cHandle, const char* stdCode, double price, double qty, const char* userTag)
+WtString hft_sell(CtxHandler cHandle, const char* stdCode, double price, double qty, const char* userTag, int flag)
 {
 	HftContextPtr ctx = getRunner().getHftContext(cHandle);
 	if (ctx == NULL)
@@ -1038,7 +1145,7 @@ WtString hft_sell(CtxHandler cHandle, const char* stdCode, double price, double 
 	static std::string ret;
 
 	std::stringstream ss;
-	OrderIDs ids = ctx->stra_sell(stdCode, price, qty, userTag);
+	OrderIDs ids = ctx->stra_sell(stdCode, price, qty, userTag, flag);
 	for (uint32_t localid : ids)
 	{
 		ss << localid << ",";
@@ -1070,8 +1177,8 @@ WtString hft_load_userdata(CtxHandler cHandle, const char* key, const char* defV
 #pragma endregion "HFT策略接口"
 
 #pragma region "扩展Parser接口"
-void parser_push_quote(const char* id, WTSTickStruct* curTick, bool bNeedSlice)
+void parser_push_quote(const char* id, WTSTickStruct* curTick, WtUInt32 uProcFlag)
 {
-	getRunner().on_parser_quote(id, curTick, bNeedSlice);
+	getRunner().on_ext_parser_quote(id, curTick, uProcFlag);
 }
 #pragma endregion "扩展Parser接口"

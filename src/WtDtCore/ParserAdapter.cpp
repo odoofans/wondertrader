@@ -10,12 +10,16 @@
 #include "ParserAdapter.h"
 #include "DataManager.h"
 #include "StateMonitor.h"
+#include "WtHelper.h"
+#include "IndexFactory.h"
 
-#include "../Share/TimeUtils.hpp"
 #include "../Share/StrUtil.hpp"
-#include "../Includes/WTSParams.hpp"
+#include "../Share/DLLHelper.hpp"
+
+#include "../Includes/WTSVariant.hpp"
 #include "../Includes/WTSContractInfo.hpp"
 #include "../Includes/WTSDataDef.hpp"
+#include "../Includes/WTSVariant.hpp"
 
 #include "../WTSTools/WTSBaseDataMgr.h"
 #include "../WTSTools/WTSLogger.h"
@@ -23,13 +27,14 @@
 
 //////////////////////////////////////////////////////////////////////////
 //ParserAdapter
-ParserAdapter::ParserAdapter(WTSBaseDataMgr * bgMgr, DataManager* dtMgr)
-	: m_pParser(NULL)
-	, m_funcCreate(NULL)
-	, m_funcDelete(NULL)
-	, m_bStopped(false)
-	, m_bdMgr(bgMgr)
-	, m_dtMgr(dtMgr)
+ParserAdapter::ParserAdapter(WTSBaseDataMgr * bgMgr, DataManager* dtMgr, IndexFactory *idxFactory)
+	: _parser_api(NULL)
+	, _remover(NULL)
+	, _stopped(false)
+	, _bd_mgr(bgMgr)
+	, _dt_mgr(dtMgr)
+	, _idx_fact(idxFactory)
+	, _cfg(NULL)
 {
 }
 
@@ -38,70 +43,211 @@ ParserAdapter::~ParserAdapter()
 {
 }
 
-bool ParserAdapter::initAdapter(WTSParams* params, FuncCreateParser funcCreate, FuncDeleteParser funcDelete)
+bool ParserAdapter::initExt(const char* id, IParserApi* api)
 {
-	m_funcCreate = funcCreate;
-	m_funcDelete = funcDelete;
+	if (api == NULL)
+		return false;
 
-	std::string strFilter = params->getString("filter");
-	if(!strFilter.empty())
+	_parser_api = api;
+	_id = id;
+
+	if (_parser_api)
 	{
-		const StringVector &ayFilter = StrUtil::split(strFilter, ",");
-		auto it = ayFilter.begin();
-		for(; it != ayFilter.end(); it++)
-		{
-			m_codeFilters.insert(*it);
-		}
-	}
+		_parser_api->registerSpi(this);
 
-
-	m_pParser = m_funcCreate();
-	if(m_pParser)
-	{
-		m_pParser->registerSpi(this);
-
-		if(m_pParser->init(params))
+		if (_parser_api->init(NULL))
 		{
 			ContractSet contractSet;
-			WTSArray* ayContract = m_bdMgr->getContracts();
+			WTSArray* ayContract = _bd_mgr->getContracts();
 			WTSArray::Iterator it = ayContract->begin();
 			for (; it != ayContract->end(); it++)
 			{
 				WTSContractInfo* contract = STATIC_CONVERT(*it, WTSContractInfo*);
-
-				const char * fullCode = contract->getFullCode();
-				//如果代码过滤器不为空，则进行过滤
-				if (!m_codeFilters.empty())
-				{
-					for (auto& fItem : m_codeFilters)
-					{
-						//如果fullcode（格式如CFFEX.IF2106），按照过滤器项的长度进行比较，如果匹配，则订阅
-						if (strncmp(fullCode, fItem.c_str(), fItem.size()) == 0)
-							contractSet.insert(contract->getFullCode());
-					}
-				}
-				else
-				{
-					contractSet.insert(contract->getFullCode());
-				}
+				contractSet.insert(contract->getFullCode());
 			}
 
 			ayContract->release();
 
-			m_pParser->subscribe(contractSet);
-			m_pParser->connect();
-			contractSet.clear();			
+			_parser_api->subscribe(contractSet);
+			contractSet.clear();
 		}
 		else
 		{
-			//WTSLogger::info("行情模块初始化失败,模块接口初始化失败...");
-			WTSLogger::error("Initializing of market data parser failed...");
+			WTSLogger::log_dyn("parser", _id.c_str(), LL_ERROR, "[{}] Parser initializing failed: api initializing failed...", _id.c_str());
+		}
+	}
+
+	return true;
+}
+
+
+bool ParserAdapter::init(const char* id, WTSVariant* cfg)
+{
+	if (cfg == NULL)
+		return false;
+
+	_id = id;
+
+	if (_cfg != NULL)
+		return false;
+
+	_cfg = cfg;
+	_cfg->retain();
+
+	{
+		//加载模块
+		if (cfg->getString("module").empty())
+			return false;
+
+		std::string module = DLLHelper::wrap_module(cfg->getCString("module"), "lib");;
+
+		if (!StdFile::exists(module.c_str()))
+		{
+			module = WtHelper::get_module_dir();
+			module += "parsers/";
+			module += DLLHelper::wrap_module(cfg->getCString("module"), "lib");
+		}
+
+		DllHandle hInst = DLLHelper::load_library(module.c_str());
+		if (hInst == NULL)
+		{
+			WTSLogger::log_dyn("parser", _id.c_str(), LL_ERROR, "[{}] Parser module {} loading failed", _id.c_str(), module.c_str());
+			return false;
+		}
+		else
+		{
+			WTSLogger::log_dyn("parser", _id.c_str(), LL_INFO, "[{}] Parser module {} loaded", _id.c_str(), module.c_str());
+		}
+
+		FuncCreateParser pFuncCreateParser = (FuncCreateParser)DLLHelper::get_symbol(hInst, "createParser");
+		if (NULL == pFuncCreateParser)
+		{
+			WTSLogger::log_dyn("parser", _id.c_str(), LL_FATAL, "[{}] Entrance function createParser not found", _id.c_str());
+			return false;
+		}
+
+		_parser_api = pFuncCreateParser();
+		if (NULL == _parser_api)
+		{
+			WTSLogger::log_dyn("parser", _id.c_str(), LL_FATAL, "[{}] Creating parser api failed", _id.c_str());
+			return false;
+		}
+
+		_remover = (FuncDeleteParser)DLLHelper::get_symbol(hInst, "deleteParser");
+	}
+
+
+	const std::string& strFilter = cfg->getString("filter");
+	if (!strFilter.empty())
+	{
+		const StringVector &ayFilter = StrUtil::split(strFilter, ",");
+		auto it = ayFilter.begin();
+		for (; it != ayFilter.end(); it++)
+		{
+			_exchg_filter.insert(*it);
+		}
+	}
+
+	std::string strCodes = cfg->getString("code");
+	if (!strCodes.empty())
+	{
+		const StringVector &ayCodes = StrUtil::split(strCodes, ",");
+		auto it = ayCodes.begin();
+		for (; it != ayCodes.end(); it++)
+		{
+			_code_filter.insert(*it);
+		}
+	}
+
+	if (_parser_api)
+	{
+		_parser_api->registerSpi(this);
+
+		if (_parser_api->init(cfg))
+		{
+			ContractSet contractSet;
+			if (!_code_filter.empty())//优先判断合约过滤器
+			{
+				ExchgFilter::iterator it = _code_filter.begin();
+				for (; it != _code_filter.end(); it++)
+				{
+					//全代码,形式如SSE.600000,期货代码为CFFEX.IF2005
+					std::string code, exchg;
+					auto ay = StrUtil::split((*it).c_str(), ".");
+					if (ay.size() == 1)
+						code = ay[0];
+					else if (ay.size() == 2)
+					{
+						exchg = ay[0];
+						code = ay[1];
+					}
+					else if (ay.size() == 3)
+					{
+						exchg = ay[0];
+						code = ay[2];
+					}
+					WTSContractInfo* contract = _bd_mgr->getContract(code.c_str(), exchg.c_str());
+					if (contract)
+						contractSet.insert(contract->getFullCode());
+					else
+					{
+						//如果是品种ID，则将该品种下全部合约都加到订阅列表
+						WTSCommodityInfo* commInfo = _bd_mgr->getCommodity(exchg.c_str(), code.c_str());
+						if (commInfo)
+						{
+							const auto& codes = commInfo->getCodes();
+							for (const auto& c : codes)
+							{
+								contractSet.insert(fmt::format("{}.{}", exchg, c.c_str()));
+							}
+						}
+					}
+				}
+			}
+			else if (!_exchg_filter.empty())
+			{
+				ExchgFilter::iterator it = _exchg_filter.begin();
+				for (; it != _exchg_filter.end(); it++)
+				{
+					const char* exchg = (*it).c_str();
+					WTSArray* ayContract = _bd_mgr->getContracts(exchg);
+					auto cnt = ayContract->size();
+					WTSArray::Iterator it = ayContract->begin();
+					for (; it != ayContract->end(); it++)
+					{
+						WTSContractInfo* contract = STATIC_CONVERT(*it, WTSContractInfo*);
+						contractSet.insert(contract->getFullCode());
+					}
+
+					ayContract->release();
+
+					WTSLogger::log_dyn("parser", _id.c_str(), LL_INFO, "[{}] {} contracts of {} added to sublist...", _id.c_str(), cnt, exchg);
+				}
+			}
+			else
+			{
+				WTSArray* ayContract = _bd_mgr->getContracts();
+				WTSArray::Iterator it = ayContract->begin();
+				for (; it != ayContract->end(); it++)
+				{
+					WTSContractInfo* contract = STATIC_CONVERT(*it, WTSContractInfo*);
+					contractSet.insert(contract->getFullCode());
+				}
+
+				ayContract->release();
+			}
+
+			_parser_api->subscribe(contractSet);
+			contractSet.clear();
+		}
+		else
+		{
+			WTSLogger::log_dyn("parser", _id.c_str(), LL_ERROR, "[{}] Parser initializing failed: api initializing failed...", _id.c_str());
 		}
 	}
 	else
 	{
-		//WTSLogger::info("行情模块初始化失败,获取模块接口失败...");
-		WTSLogger::error("Creation of market data parser failed...");
+		WTSLogger::log_dyn("parser", _id.c_str(), LL_ERROR, "[{}] Parser initializing failed: creating api failed...", _id.c_str());
 	}
 
 	return true;
@@ -109,13 +255,25 @@ bool ParserAdapter::initAdapter(WTSParams* params, FuncCreateParser funcCreate, 
 
 void ParserAdapter::release()
 {
-	m_bStopped = true;
-	if (m_pParser)
+	_stopped = true;
+	if (_parser_api)
 	{
-		m_pParser->release();
+		_parser_api->release();
 	}
 
-	m_funcDelete(m_pParser);
+	if (_remover)
+		_remover(_parser_api);
+	else
+		delete _parser_api;
+}
+
+bool ParserAdapter::run()
+{
+	if (_parser_api == NULL)
+		return false;
+
+	_parser_api->connect();
+	return true;
 }
 
 void ParserAdapter::handleSymbolList( const WTSArray* aySymbols )
@@ -125,102 +283,135 @@ void ParserAdapter::handleSymbolList( const WTSArray* aySymbols )
 
 void ParserAdapter::handleTransaction(WTSTransData* transData)
 {
-	if (m_bStopped)
+	if (_stopped)
 		return;
 
 
 	if (transData->actiondate() == 0 || transData->tradingdate() == 0)
 		return;
 
-	WTSContractInfo* contract = m_bdMgr->getContract(transData->code(), transData->exchg());
+	WTSContractInfo* contract = _bd_mgr->getContract(transData->code(), transData->exchg());
 	if (contract == NULL)
 		return;
 
-	m_dtMgr->writeTransaction(transData);
+	_dt_mgr->writeTransaction(transData);
 }
 
 void ParserAdapter::handleOrderDetail(WTSOrdDtlData* ordDetailData)
 {
-	if (m_bStopped)
+	if (_stopped)
 		return;
 
 	if (ordDetailData->actiondate() == 0 || ordDetailData->tradingdate() == 0)
 		return;
 
-	WTSContractInfo* contract = m_bdMgr->getContract(ordDetailData->code(), ordDetailData->exchg());
+	WTSContractInfo* contract = _bd_mgr->getContract(ordDetailData->code(), ordDetailData->exchg());
 	if (contract == NULL)
 		return;
 
-	m_dtMgr->writeOrderDetail(ordDetailData);
+	_dt_mgr->writeOrderDetail(ordDetailData);
 }
 
 void ParserAdapter::handleOrderQueue(WTSOrdQueData* ordQueData)
 {
-	if (m_bStopped)
+	if (_stopped)
 		return;
 
 	if (ordQueData->actiondate() == 0 || ordQueData->tradingdate() == 0)
 		return;
 
-	WTSContractInfo* contract = m_bdMgr->getContract(ordQueData->code(), ordQueData->exchg());
+	WTSContractInfo* contract = _bd_mgr->getContract(ordQueData->code(), ordQueData->exchg());
 	if (contract == NULL)
 		return;
 		
-	m_dtMgr->writeOrderQueue(ordQueData);
+	_dt_mgr->writeOrderQueue(ordQueData);
 }
 
-void ParserAdapter::handleQuote( WTSTickData *quote, bool bNeedSlice )
+void ParserAdapter::handleQuote( WTSTickData *quote, uint32_t procFlag )
 {
-	if (m_bStopped)
+	if (_stopped)
 		return;
 
 	if (quote->actiondate() == 0 || quote->tradingdate() == 0)
 		return;
 
-	WTSContractInfo* contract = m_bdMgr->getContract(quote->code(), quote->exchg());
+	WTSContractInfo* contract = quote->getContractInfo();
+	if (contract == NULL)
+	{
+		contract = _bd_mgr->getContract(quote->code(), quote->exchg());
+		quote->setContractInfo(contract);
+	}
+
 	if (contract == NULL)
 		return;
 
-	if (!m_dtMgr->writeTick(quote, bNeedSlice))
+	if (!_dt_mgr->writeTick(quote, procFlag))
 		return;
+
+	if (_idx_fact)
+		_idx_fact->handle_quote(quote);
 }
 
-void ParserAdapter::handleParserLog( WTSLogLevel ll, const char* format, ... )
+void ParserAdapter::handleParserLog( WTSLogLevel ll, const char* message)
 {
-	if (m_bStopped)
+	if (_stopped)
 		return;
 
-	char szBuf[2048] = {0};
-	va_list args;
-	va_start(args, format);        
-	vsprintf(szBuf, format, args);
-	va_end(args);
-
-	WTSLogger::log2("parser", ll, szBuf);
+	WTSLogger::log_raw_by_cat("parser", ll, message);
 }
 
 IBaseDataMgr* ParserAdapter::getBaseDataMgr()
 {
-	return m_bdMgr;
+	return _bd_mgr;
 }
 
 
 //////////////////////////////////////////////////////////////////////////
 //ParserAdapterMgr
-ParserAdapterVec ParserAdapterMgr::m_ayAdapters;
-
-void ParserAdapterMgr::releaseAdapters()
+void ParserAdapterMgr::release()
 {
-	ParserAdapterVec::iterator it = m_ayAdapters.begin();
-	for(; it != m_ayAdapters.end(); it++)
+	for (auto it = _adapters.begin(); it != _adapters.end(); it++)
 	{
-		(*it)->release();
+		it->second->release();
 	}
 
-	m_ayAdapters.clear();
+	_adapters.clear();
 }
 
-void ParserAdapterMgr::addAdapter(ParserAdapterPtr& adapter)
+bool ParserAdapterMgr::addAdapter(const char* id, ParserAdapterPtr& adapter)
 {
-	m_ayAdapters.emplace_back(adapter);
+	if (adapter == NULL || strlen(id) == 0)
+		return false;
+
+	auto it = _adapters.find(id);
+	if (it != _adapters.end())
+	{
+		WTSLogger::error(" Same name of parsers: %s", id);
+		return false;
+	}
+
+	_adapters[id] = adapter;
+
+	return true;
+}
+
+ParserAdapterPtr ParserAdapterMgr::getAdapter(const char* id)
+{
+	auto it = _adapters.find(id);
+	if (it != _adapters.end())
+	{
+		return it->second;
+	}
+
+	return ParserAdapterPtr();
+}
+
+void ParserAdapterMgr::run()
+{
+	for (auto it = _adapters.begin(); it != _adapters.end(); it++)
+	{
+		it->second->run();
+	}
+
+	WTSLogger::info("{} parsers started", _adapters.size());
 }

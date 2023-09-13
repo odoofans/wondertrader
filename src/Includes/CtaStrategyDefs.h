@@ -13,15 +13,15 @@
 
 #include "../Includes/WTSMarcos.h"
 
-NS_OTP_BEGIN
+NS_WTP_BEGIN
 class WTSVariant;
 class ICtaStraCtx;
 class ICtaTickStraCtx;
 class WTSTickData;
 struct WTSBarStruct;
-NS_OTP_END
+NS_WTP_END
 
-USING_NS_OTP;
+USING_NS_WTP;
 
 class CtaStrategy
 {
@@ -68,6 +68,11 @@ public:
 	virtual void on_schedule(ICtaStraCtx* ctx, uint32_t uDate, uint32_t uTime){}
 
 	/*
+	 *	主体逻辑执行完成
+	 */
+	virtual void on_schedule_done(ICtaStraCtx* ctx, uint32_t uDate, uint32_t uTime) {}
+
+	/*
 	 *	tick数据
 	 */
 	virtual void on_tick(ICtaStraCtx* ctx, const char* stdCode, WTSTickData* newTick){}
@@ -76,6 +81,11 @@ public:
 	 *	K线闭合
 	 */
 	virtual void on_bar(ICtaStraCtx* ctx, const char* stdCode, const char* period, WTSBarStruct* newBar){}
+
+	/*
+	 *	条件单触发
+	 */
+	virtual void on_condition_triggered(ICtaStraCtx* ctx, const char* stdCode, double target, double price, const char* usertag) {}
 
 protected:
 	std::string _id;
